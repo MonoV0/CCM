@@ -640,7 +640,9 @@ async def help_command(interaction: discord.Interaction):
                 "`/sync_channels` — 既存メンバーの個人チャンネルを一括で紐付けます\n"
                 "`/link_channel` — メンバーと個人チャンネルを手動で紐付けます\n"
                 "`/check_channel` — 指定メンバーの紐付け状況を確認します\n"
-                "`/update_index` — 全カテゴリのチャンネル一覧indexを再生成します"
+                "`/update_index` — 全カテゴリのチャンネル一覧indexを再生成します\n"
+                "`/cleanup_ghost_permissions` — 退出済みメンバーの権限が残っているチャンネルを検出・削除します\n"
+                "`/audit_data` — 記録データと実際の状態の不整合を検出します"
             ),
             inline=False
         )
@@ -712,6 +714,124 @@ async def update_index(interaction: discord.Interaction):
         f"✅ 以下のカテゴリのチャンネル一覧を更新しました：\n" + "\n".join(updated),
         ephemeral=True
     )
+
+
+# ---- /cleanup_ghost_permissions コマンド（管理者用） ----
+
+@bot.tree.command(
+    name="cleanup_ghost_permissions",
+    description="退出済みメンバーの権限設定が残っているチャンネルを検出・削除します（管理者用）"
+)
+@discord.app_commands.describe(dry_run="実際には削除せず対象一覧だけ確認する（デフォルト：確認のみ）")
+async def cleanup_ghost_permissions(interaction: discord.Interaction, dry_run: bool = True):
+    if interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("管理者のみ使用できます。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    base_names = list(GRADE_CATEGORIES.values()) + ["日報_外部参加"]
+    found = []
+
+    for category in guild.categories:
+        if not is_personal_channel_category(category.name, base_names):
+            continue
+        for channel in category.channels:
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            for target, _overwrite in list(channel.overwrites.items()):
+                # discord.Object になっているのは、対応する Member/Role が解決できなかった
+                # ケース（退出済みメンバー、または削除済みロール）。
+                # ロールはこのBotではmember/ex_memberの2つしか使わないため、ここに出てくるのは
+                # 実質的にほぼ「退出済みメンバーの個人権限（旧オーナー権限など）」のゴースト。
+                if isinstance(target, discord.Object):
+                    found.append((channel, target.id))
+                    if not dry_run:
+                        try:
+                            await channel.set_permissions(target, overwrite=None)
+                        except Exception:
+                            pass
+
+    if not found:
+        await interaction.followup.send("✅ ゴースト権限は見つかりませんでした。", ephemeral=True)
+        return
+
+    lines = [f"・{c.mention} （残っていたID: {gid}）" for c, gid in found[:30]]
+    header = f"{'🔍 検出のみ（dry_run）' if dry_run else '🧹 削除しました'}：{len(found)}件\n\n"
+    result = header + "\n".join(lines)
+    if len(found) > 30:
+        result += f"\n...ほか{len(found) - 30}件"
+    if dry_run:
+        result += "\n\n実際に削除するには `/cleanup_ghost_permissions dry_run:False` を実行してください。"
+
+    if len(result) > 1900:
+        result = result[:1900] + "\n...(省略)"
+
+    await interaction.followup.send(result, ephemeral=True)
+
+
+# ---- /audit_data コマンド（管理者用） ----
+
+@bot.tree.command(
+    name="audit_data",
+    description="Botの記録データ（JSON）と実際のDiscordの状態を突き合わせて不整合を検出します（管理者用）"
+)
+async def audit_data(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("管理者のみ使用できます。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    data = load_data()
+    hidden_data = load_hidden_data()
+    base_names = list(GRADE_CATEGORIES.values()) + ["日報_外部参加"]
+
+    issues = []
+
+    # 1. channel_data.json：存在しないチャンネル／退出済みユーザーの記録が残っていないか
+    for user_id, channel_id in data.items():
+        channel = guild.get_channel(int(channel_id))
+        member = guild.get_member(int(user_id))
+        if not channel:
+            issues.append(f"⚠️ <@{user_id}> の記録先チャンネル(ID:{channel_id})が存在しません")
+        if not member:
+            issues.append(f"⚠️ チャンネルID:{channel_id} の所有者(ID:{user_id})はサーバーに在籍していません")
+
+    # 2. hidden_channels.json：存在しないチャンネル／記録上は非表示なのに実際は@everyoneに見える設定のもの
+    for channel_id, info in hidden_data.items():
+        channel = guild.get_channel(int(channel_id))
+        if not channel:
+            issues.append(f"⚠️ 非表示記録があるチャンネルID:{channel_id} が実際には存在しません（記録だけ残留）")
+            continue
+        everyone_ow = channel.overwrites_for(guild.default_role)
+        if everyone_ow.read_messages is not False:
+            issues.append(f"⚠️ {channel.mention} は非表示記録がありますが、実際は@everyoneから見える設定のままです")
+
+    # 3. 実際に存在する個人チャンネルのうち、channel_data.jsonに未登録のもの
+    linked_channel_ids = set(data.values())
+    for category in guild.categories:
+        if not is_personal_channel_category(category.name, base_names):
+            continue
+        for channel in category.channels:
+            if channel.name == INDEX_CHANNEL_NAME or not isinstance(channel, discord.TextChannel):
+                continue
+            if str(channel.id) not in linked_channel_ids:
+                issues.append(f"⚠️ {channel.mention} は channel_data.json に未登録です（`/check_channel` で確認できます）")
+
+    if not issues:
+        await interaction.followup.send("✅ 不整合は見つかりませんでした。", ephemeral=True)
+        return
+
+    result = f"🔍 {len(issues)}件の不整合を検出しました：\n\n" + "\n".join(issues[:30])
+    if len(issues) > 30:
+        result += f"\n...ほか{len(issues) - 30}件"
+    if len(result) > 1900:
+        result = result[:1900] + "\n...(省略)"
+
+    await interaction.followup.send(result, ephemeral=True)
 
 
 # ---- /invite コマンド ----
