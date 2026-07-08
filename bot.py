@@ -21,6 +21,10 @@ import logging
 import os
 import re
 import secrets
+import sys
+import time
+import traceback
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -40,9 +44,19 @@ DATA_DIR.mkdir(exist_ok=True)
 GUILD_CONFIG_PATH = DATA_DIR / "guild_config.json"
 TEMP_CHANNELS_PATH = DATA_DIR / "temp_channels.json"
 PRESETS_PATH = DATA_DIR / "presets.json"
+ERROR_LOG_PATH = DATA_DIR / "bot_errors.log"
+
+START_TIME = time.time()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("stage-bot")
+
+# コンソールに加えて、エラーログをファイルにも残す（ホスティング先のコンソールログが
+# 消えても、後から /stage-recent-errors や直接ファイルを見て原因調査できるようにするため）
+_file_handler = RotatingFileHandler(ERROR_LOG_PATH, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+_file_handler.setLevel(logging.WARNING)
+log.addHandler(_file_handler)
 
 DEFAULT_NAME_TEMPLATE = "🎤・{username} のステージ"
 DEFAULT_TOPIC_TEMPLATE = "{username} の雑談ステージ"
@@ -105,6 +119,25 @@ intents.voice_states = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="stagebot!", intents=intents)
+
+# 複数サーバーで動く前提のBotのため、固定の管理者IDではなく
+# Discord Developer Portal上のアプリケーション所有者を通知先として使う
+BOT_OWNER_ID: Optional[int] = None
+
+
+async def notify_owner_error(title: str, error: BaseException) -> None:
+    """例外内容をログに記録し、Bot所有者へDMで通知する共通ヘルパー"""
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    log.error("%s\n%s", title, tb)
+    if BOT_OWNER_ID is None:
+        return
+    try:
+        owner = await bot.fetch_user(BOT_OWNER_ID)
+        snippet = tb[-1500:] if len(tb) > 1500 else tb
+        await owner.send(f"🚨 **{title}**\n```\n{snippet}\n```")
+    except Exception:
+        # 通知自体が失敗してもログには残っているので致命的にはしない
+        pass
 
 
 # ==========================================
@@ -1556,6 +1589,13 @@ class SummonAndReactionView(discord.ui.View):
 # Bot イベント & コマンド
 # ==========================================
 async def setup_hook():
+    global BOT_OWNER_ID
+    try:
+        app_info = await bot.application_info()
+        BOT_OWNER_ID = app_info.owner.id
+    except Exception:
+        log.exception("Bot所有者情報の取得に失敗しました。エラー時のDM通知が無効になります。")
+
     bot.add_view(StageConsoleView())
     bot.add_view(SummonPanelView())
     bot.add_view(SummonAndReactionView())
@@ -1587,6 +1627,58 @@ async def on_ready():
                 pass
             temp_channels.pop(channel_id_str, None)
     save_temp_channels()
+
+    # 起動時に所有者へ通知。クラッシュ→再起動を繰り返している場合はDMが連続で届くので気づきやすい。
+    if BOT_OWNER_ID is not None:
+        try:
+            owner = await bot.fetch_user(BOT_OWNER_ID)
+            await owner.send(f"🟢 ステージBotが起動しました（{bot.user}）")
+        except Exception:
+            pass
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """スラッシュコマンド実行中に起きた例外を共通で捕捉する。
+    これが無いと、コマンドがエラーで失敗しても本人には「このインタラクションは失敗しました」としか
+    表示されず、原因も開発者への通知も一切ないまま「反応しない」ように見えてしまう。"""
+
+    # 権限不足はエラー通知ではなく、わかりやすい案内だけ返す
+    if isinstance(error, app_commands.MissingPermissions):
+        try:
+            await interaction.response.send_message(
+                "⚠️ このコマンドを実行する権限がありません（サーバー管理権限が必要です）。",
+                ephemeral=True
+            )
+        except Exception:
+            pass
+        return
+
+    command_name = interaction.command.name if interaction.command else "不明"
+    guild_name = interaction.guild.name if interaction.guild else "不明"
+    await notify_owner_error(
+        f"コマンドエラー：/{command_name}（実行者：{interaction.user} / サーバー：{guild_name}）",
+        error
+    )
+
+    try:
+        message = "⚠️ 内部エラーが発生しました。開発者に自動で通知されています。"
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_error(event_name, *args, **kwargs):
+    """on_voice_state_update などコマンド以外のイベントハンドラで起きた例外を共通で捕捉する"""
+    exc_type, exc_value, exc_tb = sys.exc_info()
+    if exc_value:
+        await notify_owner_error(f"イベントエラー：{event_name}", exc_value)
+    else:
+        log.error("イベントエラー：%s（詳細不明）", event_name)
 
 
 @bot.tree.command(name="stage-setup", description="一時ステージの「作成用」ボイスチャンネルを設定します。")
@@ -1769,13 +1861,68 @@ async def stage_help(interaction: discord.Interaction):
             "`/stage-reaction` — どこからでもリアクションピッカーを呼び出す\n"
             "`/stage-join` — パスワード付きステージへ参加\n"
             "`/stage-ticket` — チケットコードで入室\n"
-            "`/stage-help` — このヘルプを表示"
+            "`/stage-help` — このヘルプを表示\n"
+            "`/stage-botstatus` — Botの稼働状況を確認（サーバー管理権限が必要）\n"
+            "`/stage-recent-errors` — 直近のエラーログを確認（サーバー管理権限が必要）"
         ),
         inline=False
     )
 
     embed.set_footer(text="ステージ作成者のみパネルを操作できます。楽しいステージを！🎤")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="stage-botstatus", description="Botの稼働状況を確認します（サーバー管理権限が必要）。")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def stage_botstatus(interaction: discord.Interaction):
+    uptime_seconds = int(time.time() - START_TIME)
+    hours, remainder = divmod(uptime_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    active_stages_this_guild = sum(
+        1 for data in temp_channels.values() if data.get("guild_id") == interaction.guild_id
+    )
+
+    embed = discord.Embed(title="🩺 ステージBot稼働状況", color=discord.Color.blurple())
+    embed.add_field(name="Discord APIレイテンシ", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="起動からの経過時間", value=f"{hours}時間{minutes}分{seconds}秒", inline=True)
+    embed.add_field(name="このサーバーの稼働中ステージ数", value=str(active_stages_this_guild), inline=True)
+
+    for path, label in [(GUILD_CONFIG_PATH, "guild_config.json"), (TEMP_CHANNELS_PATH, "temp_channels.json"), (PRESETS_PATH, "presets.json")]:
+        try:
+            load_json(path, {})
+            status = "✅ 読み込み可能"
+        except Exception as e:
+            status = f"❌ エラー：{e}"
+        embed.add_field(name=label, value=status, inline=True)
+
+    embed.set_footer(text="直近のエラーは /stage-recent-errors で確認できます。")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="stage-recent-errors", description="直近のエラーログを表示します（サーバー管理権限が必要）。")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(lines="表示する行数（デフォルト：40）")
+async def stage_recent_errors(interaction: discord.Interaction, lines: int = 40):
+    if not ERROR_LOG_PATH.exists():
+        await interaction.response.send_message("エラーログはまだありません（記録されたエラーがありません）。", ephemeral=True)
+        return
+
+    with ERROR_LOG_PATH.open("r", encoding="utf-8") as f:
+        all_lines = f.readlines()
+
+    if not all_lines:
+        await interaction.response.send_message("エラーログはまだありません（記録されたエラーがありません）。", ephemeral=True)
+        return
+
+    recent = "".join(all_lines[-lines:])
+    preview = recent[-1900:] if len(recent) > 1900 else recent
+
+    await interaction.response.send_message(
+        content=f"直近{min(lines, len(all_lines))}行：\n```\n{preview}\n```",
+        file=discord.File(fp=io.BytesIO(recent.encode("utf-8")), filename="stage_bot_errors.log"),
+        ephemeral=True
+    )
 
 
 async def create_temp_stage(member: discord.Member, config: dict) -> Optional[discord.StageChannel]:

@@ -1,8 +1,13 @@
 import discord
 from discord.ext import commands, tasks
 import os
+import sys
 import asyncio
 import io
+import time
+import logging
+import traceback
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 import json
 from pathlib import Path
@@ -10,6 +15,21 @@ from datetime import datetime, timezone, timedelta
 
 DATA_FILE = Path("channel_data.json")
 HIDDEN_DATA_FILE = Path("hidden_channels.json")
+ERROR_LOG_FILE = Path("bot_errors.log")
+
+START_TIME = time.time()
+
+# ---- ロギング設定（ファイル＋コンソールの両方に出力） ----
+logger = logging.getLogger("channel_manager")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    _file_handler = RotatingFileHandler(ERROR_LOG_FILE, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    _file_handler.setFormatter(_formatter)
+    logger.addHandler(_file_handler)
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(_formatter)
+    logger.addHandler(_console_handler)
 
 # 非表示チャンネル（/leave で「残して非表示」を選んだもの）を
 # 自動削除するまでの保持日数。ここを変えるだけで運用ポリシーを調整できる。
@@ -45,6 +65,19 @@ intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+async def notify_admin_error(title: str, error: BaseException):
+    """例外内容をログに記録し、管理者へDMで通知する共通ヘルパー"""
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    logger.error(f"{title}\n{tb}")
+    try:
+        admin = await bot.fetch_user(ADMIN_ID)
+        snippet = tb[-1500:] if len(tb) > 1500 else tb
+        await admin.send(f"🚨 **{title}**\n```\n{snippet}\n```")
+    except Exception:
+        # 通知自体が失敗してもログには残っているので、致命的にはしない
+        pass
 
 GRADE_CATEGORIES = {
     "A21": "日報_A21",
@@ -642,7 +675,9 @@ async def help_command(interaction: discord.Interaction):
                 "`/check_channel` — 指定メンバーの紐付け状況を確認します\n"
                 "`/update_index` — 全カテゴリのチャンネル一覧indexを再生成します\n"
                 "`/cleanup_ghost_permissions` — 退出済みメンバーの権限が残っているチャンネルを検出・削除します\n"
-                "`/audit_data` — 記録データと実際の状態の不整合を検出します"
+                "`/audit_data` — 記録データと実際の状態の不整合を検出します\n"
+                "`/botstatus` — Botの稼働状況（レイテンシ・タスク・データファイル）を確認します\n"
+                "`/recent_errors` — 直近のエラーログを確認します"
             ),
             inline=False
         )
@@ -1511,6 +1546,121 @@ async def on_ready():
     if not cleanup_expired_hidden_channels.is_running():
         cleanup_expired_hidden_channels.start()
     print(f"起動しました：{bot.user}")
+
+    # 起動時に管理者へ通知。クラッシュ→再起動を繰り返している場合はDMが連続で届くので気づきやすい。
+    try:
+        admin = await bot.fetch_user(ADMIN_ID)
+        await admin.send(f"🟢 Botが起動しました（{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC）")
+    except Exception:
+        pass
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    """スラッシュコマンド実行中に起きた例外を共通で捕捉する。
+    これが無いと、コマンドがエラーで失敗しても本人にも管理者にも何も伝わらず「反応しない」ように見える。"""
+    command_name = interaction.command.name if interaction.command else "不明"
+    await notify_admin_error(f"コマンドエラー：/{command_name}（実行者：{interaction.user}）", error)
+
+    try:
+        message = "⚠️ 内部エラーが発生しました。管理者に自動で通知されています。"
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_error(event_name, *args, **kwargs):
+    """on_member_join などコマンド以外のイベントハンドラで起きた例外を共通で捕捉する"""
+    exc_type, exc_value, exc_tb = sys.exc_info()
+    if exc_value:
+        await notify_admin_error(f"イベントエラー：{event_name}", exc_value)
+    else:
+        logger.error(f"イベントエラー：{event_name}（詳細不明）")
+
+
+@cleanup_expired_hidden_channels.error
+async def cleanup_expired_hidden_channels_error(error):
+    """定期タスクは例外が起きると何も知らせずに完全停止するため、通知した上で再起動を試みる"""
+    await notify_admin_error(
+        "定期タスク（非表示チャンネル自動削除）でエラーが発生し停止しました。自動で再起動を試みます。",
+        error
+    )
+    await asyncio.sleep(60)
+    if not cleanup_expired_hidden_channels.is_running():
+        cleanup_expired_hidden_channels.start()
+
+
+# ---- /botstatus コマンド（管理者用） ----
+
+@bot.tree.command(name="botstatus", description="Botの稼働状況を確認します（管理者用）")
+async def botstatus(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("管理者のみ使用できます。", ephemeral=True)
+        return
+
+    uptime_seconds = int(time.time() - START_TIME)
+    hours, remainder = divmod(uptime_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    embed = discord.Embed(title="🩺 Bot稼働状況", color=0x5865F2)
+    embed.add_field(name="Discord APIレイテンシ", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="起動からの経過時間", value=f"{hours}時間{minutes}分{seconds}秒", inline=True)
+    embed.add_field(
+        name="非表示チャンネル自動削除タスク",
+        value="✅ 稼働中" if cleanup_expired_hidden_channels.is_running() else "❌ 停止中（要確認）",
+        inline=False
+    )
+
+    try:
+        load_data()
+        data_status = "✅ 読み込み可能"
+    except Exception as e:
+        data_status = f"❌ エラー：{e}"
+    try:
+        load_hidden_data()
+        hidden_status = "✅ 読み込み可能"
+    except Exception as e:
+        hidden_status = f"❌ エラー：{e}"
+
+    embed.add_field(name="channel_data.json", value=data_status, inline=True)
+    embed.add_field(name="hidden_channels.json", value=hidden_status, inline=True)
+    embed.set_footer(text="直近のエラーは /recent_errors で確認できます。")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ---- /recent_errors コマンド（管理者用） ----
+
+@bot.tree.command(name="recent_errors", description="直近のエラーログを表示します（管理者用）")
+@discord.app_commands.describe(lines="表示する行数（デフォルト：40）")
+async def recent_errors(interaction: discord.Interaction, lines: int = 40):
+    if interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("管理者のみ使用できます。", ephemeral=True)
+        return
+
+    if not ERROR_LOG_FILE.exists():
+        await interaction.response.send_message("エラーログはまだありません（記録されたエラーがありません）。", ephemeral=True)
+        return
+
+    with open(ERROR_LOG_FILE, "r", encoding="utf-8") as f:
+        all_lines = f.readlines()
+
+    if not all_lines:
+        await interaction.response.send_message("エラーログはまだありません（記録されたエラーがありません）。", ephemeral=True)
+        return
+
+    recent = "".join(all_lines[-lines:])
+    preview = recent[-1900:] if len(recent) > 1900 else recent
+
+    await interaction.response.send_message(
+        content=f"直近{min(lines, len(all_lines))}行：\n```\n{preview}\n```",
+        file=discord.File(fp=io.BytesIO(recent.encode("utf-8")), filename="recent_errors.log"),
+        ephemeral=True
+    )
 
 
 bot.run(TOKEN)
