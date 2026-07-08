@@ -1424,16 +1424,34 @@ async def update_channel_index(guild, category):
         pass
 
     hidden_data = load_hidden_data()
-    channels = sorted(
-        (
-            c for c in category.channels
-            if c.id != index_channel.id
-            and isinstance(c, discord.TextChannel)
-            and str(c.id) not in hidden_data
-        ),
-        key=lambda c: c.name
-    )
-    lines = [f"・{c.mention}" for c in channels]
+    data = load_data()
+    # channel_id -> user_id の逆引きを作る（誰のチャンネルかを一覧に併記するため）
+    owner_by_channel = {v: k for k, v in data.items()}
+
+    candidate_channels = [
+        c for c in category.channels
+        if c.id != index_channel.id
+        and isinstance(c, discord.TextChannel)
+        and str(c.id) not in hidden_data
+    ]
+
+    def sort_key(c):
+        user_id = owner_by_channel.get(str(c.id))
+        member = guild.get_member(int(user_id)) if user_id else None
+        # 所有者名が分かるものは表示名でソートし、不明なものは最後にまとめる
+        return (0, member.display_name.lower()) if member else (1, c.name.lower())
+
+    channels = sorted(candidate_channels, key=sort_key)
+
+    lines = []
+    for c in channels:
+        user_id = owner_by_channel.get(str(c.id))
+        member = guild.get_member(int(user_id)) if user_id else None
+        if member:
+            lines.append(f"・{c.mention} — **{member.display_name}**")
+        else:
+            lines.append(f"・{c.mention} — （所有者不明。チャンネル名が変更されている場合は `/find` や `/check_channel` で確認できます）")
+
     header = f"📌 **{category.name} のチャンネル一覧**（{len(channels)}件）\n\n"
 
     chunks = []
