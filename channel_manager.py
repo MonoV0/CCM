@@ -423,7 +423,13 @@ async def perform_reset(interaction: discord.Interaction, member: discord.Member
         await member.remove_roles(ex_member_role)
 
     if existing:
+        category = existing.category
         await existing.delete(reason="管理者によるリセット")
+        if category:
+            try:
+                await update_channel_index(guild, category)
+            except Exception:
+                pass
 
     # JSONの紐付け情報も忘れずに削除（残っていると次回誤検出の原因になる）
     data = load_data()
@@ -868,7 +874,10 @@ class KickCancelView(discord.ui.View):
         if not self.cancelled:
             try:
                 if self.channel:
+                    category = self.channel.category
                     await self.channel.delete(reason="退出に伴う個人チャンネル削除")
+                    if category:
+                        await update_channel_index(self.guild, category)
                 elif self.hide_channel:
                     await hide_channel_from_others(self.hide_channel, self.guild, self.member.id)
                 await self.guild.kick(self.member, reason="退出申請によるキック")
@@ -901,6 +910,13 @@ async def hide_channel_from_others(channel, guild, user_id):
         "hidden_at": datetime.now(timezone.utc).isoformat(),
     }
     save_hidden_data(hidden_data)
+
+    # 非表示化により通常メンバーからは見えなくなるため、一覧indexからも外す
+    if channel.category:
+        try:
+            await update_channel_index(guild, channel.category)
+        except Exception:
+            pass
 
 
 @tasks.loop(hours=24)
@@ -1067,8 +1083,11 @@ class DeleteMyDataConfirmView(discord.ui.View):
         guild = interaction.guild
         member = interaction.user
 
+        category = self.channel.category
         try:
             await self.channel.delete(reason="本人による自己データ削除")
+            if category:
+                await update_channel_index(guild, category)
         except Exception:
             pass
 
@@ -1202,6 +1221,12 @@ async def restore_channel_permissions(channel, guild, member):
     if str(channel.id) in hidden_data:
         del hidden_data[str(channel.id)]
         save_hidden_data(hidden_data)
+        # 非表示中はindexの一覧から除外されているため、復帰時に再掲載する
+        if channel.category:
+            try:
+                await update_channel_index(guild, channel.category)
+            except Exception:
+                pass
 
 
 async def get_or_create_available_category(guild, base_name):
@@ -1243,8 +1268,14 @@ async def update_channel_index(guild, category):
     except Exception:
         pass
 
+    hidden_data = load_hidden_data()
     channels = sorted(
-        (c for c in category.channels if c.id != index_channel.id and isinstance(c, discord.TextChannel)),
+        (
+            c for c in category.channels
+            if c.id != index_channel.id
+            and isinstance(c, discord.TextChannel)
+            and str(c.id) not in hidden_data
+        ),
         key=lambda c: c.name
     )
     lines = [f"・{c.mention}" for c in channels]
