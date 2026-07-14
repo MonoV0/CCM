@@ -1667,10 +1667,6 @@ async def create_personal_channel(guild, member, category_name):
     await update_channel_index(guild, category)
 
 
-@bot.tree.command(name="setup_selfpanel", description="このチャンネルに設定パネルを設置します")
-async def setup_selfpanel(interaction: discord.Interaction):
-    owner_id = get_channel_owner_id(interaction.channel.id)
-
 @bot.tree.command(name="setup_selfpanel", description="自分の個人チャンネルに設定パネルを設置します")
 async def setup_selfpanel(interaction: discord.Interaction):
     data = load_data()
