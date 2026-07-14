@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 
 DATA_FILE = Path("channel_data.json")
 HIDDEN_DATA_FILE = Path("hidden_channels.json")
+STARRED_DATA_FILE = Path("starred_channels.json")
 ERROR_LOG_FILE = Path("bot_errors.log")
 
 START_TIME = time.time()
@@ -55,6 +56,25 @@ def load_hidden_data() -> dict:
 def save_hidden_data(data: dict):
     with open(HIDDEN_DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
+def load_starred_data() -> dict:
+    """{user_id(str): [channel_id(str), ...]} を保持する"""
+    if not STARRED_DATA_FILE.exists():
+        return {}
+    with open(STARRED_DATA_FILE, "r") as f:
+        return json.load(f)
+
+def save_starred_data(data: dict):
+    with open(STARRED_DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def get_channel_owner_id(channel_id: int) -> int | None:
+    """channel_data.json から、このチャンネルの所有者ユーザーIDを逆引きする"""
+    data = load_data()
+    for user_id_str, cid_str in data.items():
+        if cid_str == str(channel_id):
+            return int(user_id_str)
+    return None
 
 load_dotenv()
 TOKEN = os.getenv("CHANNEL_MANAGER_TOKEN")
@@ -1479,6 +1499,54 @@ async def update_channel_index(guild, category):
             pass
 
 
+def make_self_panel_embed() -> discord.Embed:
+    """チャンネル設定パネル用のembed。ウェルカムメッセージ内、および /setup_selfpanel で共通利用する。"""
+    embed = discord.Embed(
+        title="🛠️ チャンネル設定パネル",
+        description="ここから自分のチャンネルの設定を操作できます。",
+        color=0x5865F2
+    )
+    return embed
+
+
+class ChannelSettingsView(discord.ui.View):
+    """所有者情報を持たない、全チャンネル共通のテンプレートView。
+    on_ready で一度だけ bot.add_view() すれば、Bot再起動後も全パネルのボタンが機能し続ける。
+    所有者判定はボタン押下のたびに channel_data.json から都度引くため、
+    既存の /leave・権限復元などのオーナー管理ロジックとは独立して動作する。"""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="⭐ お気に入り登録/解除", style=discord.ButtonStyle.secondary, custom_id="star_toggle")
+    async def toggle_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        owner_id = get_channel_owner_id(interaction.channel.id)
+
+        if owner_id is None:
+            await interaction.response.send_message(
+                "このチャンネルは個人チャンネルとして登録されていません。", ephemeral=True
+            )
+            return
+
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message("このチャンネルの所有者のみ操作できます。", ephemeral=True)
+            return
+
+        data = load_starred_data()
+        user_id = str(interaction.user.id)
+        channel_id = str(interaction.channel.id)
+        starred = data.get(user_id, [])
+
+        if channel_id in starred:
+            starred.remove(channel_id)
+            await interaction.response.send_message("⭐ お気に入りから解除しました。", ephemeral=True)
+        else:
+            starred.append(channel_id)
+            await interaction.response.send_message("⭐ お気に入りに登録しました。", ephemeral=True)
+
+        data[user_id] = starred
+        save_starred_data(data)
+
+
 async def create_personal_channel(guild, member, category_name):
     category = await get_or_create_available_category(guild, category_name)
 
@@ -1525,8 +1593,29 @@ async def create_personal_channel(guild, member, category_name):
     )
     await channel.send(content=member.mention, embed=welcome_embed)
 
+    # チャンネル設定パネルを同時に設置(お気に入り登録などをボタンで完結できるようにする)
+    await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
+
     # チャンネル一覧indexを更新
     await update_channel_index(guild, category)
+
+
+@bot.tree.command(name="setup_selfpanel", description="このチャンネルに設定パネルを設置します")
+async def setup_selfpanel(interaction: discord.Interaction):
+    owner_id = get_channel_owner_id(interaction.channel.id)
+
+    if owner_id is None:
+        await interaction.response.send_message(
+            "このチャンネルは個人チャンネルとして登録されていません。", ephemeral=True
+        )
+        return
+
+    if interaction.user.id != owner_id and interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("このチャンネルの所有者のみ実行できます。", ephemeral=True)
+        return
+
+    await interaction.channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
+    await interaction.response.send_message("✅ 設定パネルを設置しました。", ephemeral=True)
 
 
 # ---- 起動 ----
@@ -1563,6 +1652,11 @@ async def on_ready():
     await bot.tree.sync()
     if not cleanup_expired_hidden_channels.is_running():
         cleanup_expired_hidden_channels.start()
+
+    # チャンネル設定パネルの永続View登録。所有者情報を持たないテンプレートなので
+    # これを1回登録するだけで、既存の全チャンネルに設置済みのパネルもBot再起動後に機能し続ける。
+    bot.add_view(ChannelSettingsView())
+
     print(f"起動しました：{bot.user}")
 
     # 起動時に管理者へ通知。クラッシュ→再起動を繰り返している場合はDMが連続で届くので気づきやすい。
