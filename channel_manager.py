@@ -58,7 +58,7 @@ def save_hidden_data(data: dict):
         json.dump(data, f, indent=2)
 
 def load_starred_data() -> dict:
-    """{user_id(str): [channel_id(str), ...]} を保持する"""
+    """{user_id(str): {"channels": [channel_id(str), ...], "category_id": str|None, "index_channel_id": str|None}} を保持する"""
     if not STARRED_DATA_FILE.exists():
         return {}
     with open(STARRED_DATA_FILE, "r") as f:
@@ -75,6 +75,75 @@ def get_channel_owner_id(channel_id: int) -> int | None:
         if cid_str == str(channel_id):
             return int(user_id_str)
     return None
+
+
+async def rebuild_favorites_index(guild: discord.Guild, member: discord.Member, entry: dict):
+    """本人専用のお気に入り一覧チャンネルの内容を、現在の登録状況に合わせて書き直す"""
+    index_channel = guild.get_channel(int(entry["index_channel_id"])) if entry.get("index_channel_id") else None
+    if index_channel is None:
+        return
+
+    lines = []
+    for cid in entry.get("channels", []):
+        channel = guild.get_channel(int(cid))
+        if channel:
+            lines.append(f"・{channel.mention}")
+        else:
+            lines.append(f"・（削除済みチャンネル: {cid}）")
+
+    content = "⭐ **あなたのお気に入りチャンネル一覧**\n\n" + ("\n".join(lines) if lines else "まだ登録がありません。")
+
+    async for msg in index_channel.history(limit=10):
+        if msg.author == guild.me:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+    await index_channel.send(content)
+
+
+async def get_or_create_favorites_category(guild: discord.Guild, member: discord.Member, data: dict) -> dict:
+    """本人にだけ見えるお気に入りカテゴリ＋一覧チャンネルを、無ければ作成して entry を返す"""
+    user_id = str(member.id)
+    entry = data.get(user_id, {"channels": [], "category_id": None, "index_channel_id": None})
+
+    category = guild.get_channel(int(entry["category_id"])) if entry.get("category_id") else None
+    if category is None:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+        }
+        category = await guild.create_category(f"⭐ {member.display_name}のお気に入り", overwrites=overwrites)
+        entry["category_id"] = str(category.id)
+        entry["index_channel_id"] = None  # カテゴリを作り直した場合は一覧チャンネルも作り直す
+
+    index_channel = guild.get_channel(int(entry["index_channel_id"])) if entry.get("index_channel_id") else None
+    if index_channel is None:
+        index_channel = await guild.create_text_channel("一覧", category=category)
+        entry["index_channel_id"] = str(index_channel.id)
+
+    data[user_id] = entry
+    return entry
+
+
+async def delete_favorites_category_if_empty(guild: discord.Guild, entry: dict):
+    """お気に入りが0件になったら、放置されたカテゴリを残さないよう削除する"""
+    if entry.get("channels"):
+        return
+    index_channel = guild.get_channel(int(entry["index_channel_id"])) if entry.get("index_channel_id") else None
+    category = guild.get_channel(int(entry["category_id"])) if entry.get("category_id") else None
+    if index_channel:
+        try:
+            await index_channel.delete()
+        except Exception:
+            pass
+    if category:
+        try:
+            await category.delete()
+        except Exception:
+            pass
+    entry["category_id"] = None
+    entry["index_channel_id"] = None
 
 load_dotenv()
 TOKEN = os.getenv("CHANNEL_MANAGER_TOKEN")
@@ -1522,17 +1591,27 @@ class ChannelSettingsView(discord.ui.View):
         data = load_starred_data()
         user_id = str(interaction.user.id)
         channel_id = str(interaction.channel.id)
-        starred = data.get(user_id, [])
+        entry = data.get(user_id, {"channels": [], "category_id": None, "index_channel_id": None})
+        starred = entry.get("channels", [])
 
         if channel_id in starred:
             starred.remove(channel_id)
+            entry["channels"] = starred
+            data[user_id] = entry
+            await delete_favorites_category_if_empty(interaction.guild, entry)
+            if entry.get("index_channel_id"):
+                await rebuild_favorites_index(interaction.guild, interaction.user, entry)
+            save_starred_data(data)
             await interaction.response.send_message("⭐ お気に入りから解除しました。", ephemeral=True)
         else:
             starred.append(channel_id)
+            entry["channels"] = starred
+            entry = await get_or_create_favorites_category(interaction.guild, interaction.user, data)
+            entry["channels"] = starred
+            data[user_id] = entry
+            await rebuild_favorites_index(interaction.guild, interaction.user, entry)
+            save_starred_data(data)
             await interaction.response.send_message("⭐ お気に入りに登録しました。", ephemeral=True)
-
-        data[user_id] = starred
-        save_starred_data(data)
 
 
 async def create_personal_channel(guild, member, category_name):
@@ -1592,18 +1671,26 @@ async def create_personal_channel(guild, member, category_name):
 async def setup_selfpanel(interaction: discord.Interaction):
     owner_id = get_channel_owner_id(interaction.channel.id)
 
-    if owner_id is None:
+@bot.tree.command(name="setup_selfpanel", description="自分の個人チャンネルに設定パネルを設置します")
+async def setup_selfpanel(interaction: discord.Interaction):
+    data = load_data()
+    channel_id_str = data.get(str(interaction.user.id))
+
+    if channel_id_str is None:
         await interaction.response.send_message(
-            "このチャンネルは個人チャンネルとして登録されていません。", ephemeral=True
+            "あなたに紐付けられた個人チャンネルが見つかりませんでした。", ephemeral=True
         )
         return
 
-    if interaction.user.id != owner_id and interaction.user.id != ADMIN_ID:
-        await interaction.response.send_message("このチャンネルの所有者のみ実行できます。", ephemeral=True)
+    channel = interaction.guild.get_channel(int(channel_id_str))
+    if channel is None:
+        await interaction.response.send_message(
+            "登録されているチャンネルが見つかりませんでした（削除済みの可能性があります）。", ephemeral=True
+        )
         return
 
-    await interaction.channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
-    await interaction.response.send_message("✅ 設定パネルを設置しました。", ephemeral=True)
+    await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
+    await interaction.response.send_message(f"✅ {channel.mention} に設定パネルを設置しました。", ephemeral=True)
 
 
 # ---- 起動 ----
