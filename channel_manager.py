@@ -1503,34 +1503,22 @@ def make_self_panel_embed() -> discord.Embed:
     """チャンネル設定パネル用のembed。ウェルカムメッセージ内、および /setup_selfpanel で共通利用する。"""
     embed = discord.Embed(
         title="🛠️ チャンネル設定パネル",
-        description="ここから自分のチャンネルの設定を操作できます。",
+        description="このチャンネルをよく訪れる人は、下のボタンから自分だけのお気に入りに追加できます。",
         color=0x5865F2
     )
     return embed
 
 
 class ChannelSettingsView(discord.ui.View):
-    """所有者情報を持たない、全チャンネル共通のテンプレートView。
+    """全チャンネル共通のテンプレートView。
     on_ready で一度だけ bot.add_view() すれば、Bot再起動後も全パネルのボタンが機能し続ける。
-    所有者判定はボタン押下のたびに channel_data.json から都度引くため、
-    既存の /leave・権限復元などのオーナー管理ロジックとは独立して動作する。"""
+    お気に入りは「押した本人のための個人ブックマーク」であり、チャンネルの所有者かどうかは無関係。
+    そのため toggle_star は所有者チェックを行わず、押した本人の starred_channels に記録する。"""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="⭐ お気に入り登録/解除", style=discord.ButtonStyle.secondary, custom_id="star_toggle")
+    @discord.ui.button(label="⭐ このチャンネルをお気に入りに追加/解除", style=discord.ButtonStyle.secondary, custom_id="star_toggle")
     async def toggle_star(self, interaction: discord.Interaction, button: discord.ui.Button):
-        owner_id = get_channel_owner_id(interaction.channel.id)
-
-        if owner_id is None:
-            await interaction.response.send_message(
-                "このチャンネルは個人チャンネルとして登録されていません。", ephemeral=True
-            )
-            return
-
-        if interaction.user.id != owner_id:
-            await interaction.response.send_message("このチャンネルの所有者のみ操作できます。", ephemeral=True)
-            return
-
         data = load_starred_data()
         user_id = str(interaction.user.id)
         channel_id = str(interaction.channel.id)
