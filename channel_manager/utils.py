@@ -382,6 +382,11 @@ async def create_personal_channel(guild, member, category_name):
     await channel.send(content=member.mention, embed=welcome_embed)
 
     # チャンネル設定パネルを同時に設置(お気に入り登録などをボタンで完結できるようにする)
+    # ChannelSettingsView は views.py 側にあり、views.py はこの utils.py をトップレベルで
+    # importしているため、ここでトップレベルimportすると循環importになってしまう。
+    # 呼び出し時点（関数の中）でimportすることで、両モジュールの読み込みが終わった後に
+    # 解決されるようにしている。
+    from views import ChannelSettingsView
     await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
 
     # チャンネル一覧indexを更新
