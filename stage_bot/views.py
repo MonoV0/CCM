@@ -215,27 +215,51 @@ class StagePasswordModal(discord.ui.Modal, title="パスワードの設定"):
             return
             
         # パスワード設定＆自動で非公開にする
-        temp_channels[channel_id_str]["password"] = new_pwd
-        save_temp_channels()
-        
         guild = interaction.guild
         default_role = guild.default_role
         overwrite = channel.overwrites_for(default_role)
-        
+
+        privacy_failed = False
+        name_failed = False
+
         if overwrite.view_channel is not False:
             overwrite.view_channel = False
-            new_name = channel.name
-            if not new_name.startswith("🔒"):
-                new_name = f"🔒{new_name}"
+
+            # 権限変更（非公開化）を必須処理として先に実行する。
+            # これが失敗した場合、Bot内部でパスワード付き扱いにしてしまうと
+            # 「本人は非公開だと思っているが実際には誰でも入れる」状態になるため、
+            # temp_channelsへの保存自体を行わない。
             try:
-                await channel.edit(name=new_name[:100])
                 await channel.set_permissions(default_role, overwrite=overwrite, reason="パスワード設定により非公開化")
             except discord.HTTPException:
-                pass
+                privacy_failed = True
+
+            # 鍵アイコンの付与は補助的な処理。失敗しても非公開化の成否には影響させない。
+            if not privacy_failed:
+                new_name = channel.name
+                if not new_name.startswith("🔒"):
+                    new_name = f"🔒{new_name}"
+                try:
+                    await channel.edit(name=new_name[:100])
+                except discord.HTTPException:
+                    name_failed = True
+
+        if privacy_failed:
+            await interaction.followup.send(
+                "❌ 権限の変更に失敗したため、パスワードを設定できませんでした。\n"
+                "ステージは現在も公開状態のままです。時間を置くか、Botの権限をご確認の上もう一度お試しください。",
+                ephemeral=True
+            )
+            return
+
+        # 権限変更が確認できてから、初めてBot内部でパスワード付きとして確定させる
+        temp_channels[channel_id_str]["password"] = new_pwd
+        save_temp_channels()
 
         view = SendInvitePanelView(channel_id_str)
+        note = "\n\n⚠️ ただしチャンネル名への🔒マーク付与には失敗しました（表示上の見た目のみの問題です）。" if name_failed else ""
         await interaction.followup.send(
-            f"🔐 パスワードを「{new_pwd}」に設定し、非公開にしました！\n\n"
+            f"🔐 パスワードを「{new_pwd}」に設定し、非公開にしました！{note}\n\n"
             "他のメンバーが簡単に参加できるようにするための「招待パネル」を送信します。\n"
             "送信先のテキストチャンネルを下から選んでください。",
             view=view,
@@ -1403,4 +1427,3 @@ class SummonAndReactionView(discord.ui.View):
             view=ReactionPickerView(channel),
             ephemeral=True
         )
-
