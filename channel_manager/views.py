@@ -3,7 +3,7 @@ discord.ui のモーダル・ビュー定義まとめ。
 オンボーディング（ルール確認→参加区分→学年選択）、招待承認、
 チャンネル名変更、退出時の確認、リセット確認、設定パネルなど。
 """
-import asyncio
+from onboarding import finish_onboarding
 
 import discord
 
@@ -53,121 +53,49 @@ class RoleSelectView(discord.ui.View):
 
     @discord.ui.button(label="🎓 在学生・既卒生", style=discord.ButtonStyle.primary, row=0)
     async def member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
-        if existing:
-            # 権限復元などの処理は3秒制限に引っかかるリスクがあるため、先に応答を確定させる
-            await interaction.response.send_message(
-                embed=make_embed(
-                    step=2,
-                    title="✅ チャンネルが見つかりました！",
-                    description=f"以前作成した個人チャンネル {existing.mention} を確認してください。\n\nこのチャンネルは3秒後に自動削除されます。",
-                    color=0x57F287
-                ),
-                ephemeral=True
-            )
-
-            role = discord.utils.get(interaction.guild.roles, name="member")
-            if role:
-                await interaction.user.add_roles(role)
-
-            await restore_channel_permissions(existing, interaction.guild, interaction.user)
-            await existing.send(f"{interaction.user.mention} おかえりなさい！あなたのチャンネルはここです👋")
-            await asyncio.sleep(3)
-            await interaction.channel.delete()
-            return
-
         role = discord.utils.get(interaction.guild.roles, name="member")
         if role:
             await interaction.user.add_roles(role)
-
-        embed = make_embed(
-            step=3,
-            title="📅 学年を選んでください",
-            description="あなたの学年を選択してください。"
-        )
-        await interaction.response.send_message(embed=embed, view=GradeSelectView(), ephemeral=True)
+        if existing:
+            await restore_channel_permissions(existing, interaction.guild, interaction.user)
+            await finish_onboarding(interaction, existing, restored=True)
+            return
+        embed = make_embed(step=3, title="📅 学年を選んでください", description="あなたの学年を選択してください。")
+        await interaction.followup.send(embed=embed, view=GradeSelectView(), ephemeral=True)
 
     @discord.ui.button(label="👤 外部参加", style=discord.ButtonStyle.secondary, row=0)
     async def ex_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. まず最初に defer() を呼び出して3秒制限を回避する
         await interaction.response.defer(ephemeral=True)
-
         existing = await get_existing_channel(interaction.guild, interaction.user)
-        if existing:
-            role = discord.utils.get(interaction.guild.roles, name="ex_member")
-            if role:
-                await interaction.user.add_roles(role)
-
-            await restore_channel_permissions(existing, interaction.guild, interaction.user)
-            await existing.send(f"{interaction.user.mention} おかえりなさい！あなたのチャンネルはここです👋")
-            
-            # 2. defer した後は interaction.response.send_message ではなく interaction.followup.send を使う
-            await interaction.followup.send(
-                embed=make_embed(
-                    step=2,
-                    title="✅ チャンネルが見つかりました！",
-                    description=f"以前作成した個人チャンネル {existing.mention} を確認してください。\n\nこのチャンネルは3秒後に自動削除されます。",
-                    color=0x57F287
-                ),
-                ephemeral=True
-            )
-            await asyncio.sleep(3)
-            await interaction.channel.delete()
-            return
-
         role = discord.utils.get(interaction.guild.roles, name="ex_member")
         if role:
             await interaction.user.add_roles(role)
-
-        # 時間のかかるチャンネル作成処理
-        await create_personal_channel(interaction.guild, interaction.user, "日報_外部参加")
-        personal_channel = await get_existing_channel(interaction.guild, interaction.user)
-
-        embed = make_embed(
-            step=3,
-            title="✅ 完了！",
-            description=f"個人チャンネルを作成しました！\n{personal_channel.mention} から始めましょう🎉\n\nこのチャンネルは3秒後に自動削除されます。",
-            color=0x57F287
-        )
-        
-        # 3. ここも interaction.followup.send に変更
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        await asyncio.sleep(3)
-        await interaction.channel.delete()
+        if existing:
+            await restore_channel_permissions(existing, interaction.guild, interaction.user)
+            personal_channel = existing
+        else:
+            personal_channel = await create_personal_channel(interaction.guild, interaction.user, "日報_外部参加")
+        await finish_onboarding(interaction, personal_channel, restored=existing is not None)
 
     @discord.ui.button(label="🔍 すでにチャンネルを持っている", style=discord.ButtonStyle.success, row=1)
     async def already_have_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
-        if existing:
-            member_role = discord.utils.get(interaction.guild.roles, name="member")
-            ex_member_role = discord.utils.get(interaction.guild.roles, name="ex_member")
-
-            await interaction.response.send_message(
-                embed=make_embed(
-                    step=2,
-                    title="✅ チャンネルが見つかりました！",
-                    description=f"以前作成した個人チャンネル {existing.mention} を確認してください。\n\nこのチャンネルは3秒後に自動削除されます。",
-                    color=0x57F287
-                ),
-                ephemeral=True
+        if not existing:
+            await interaction.followup.send(
+                "個人チャンネルが見つかりませんでした。参加区分を選んでチャンネルを作成してください。", ephemeral=True
             )
-
-            if existing.category and existing.category.name == "日報_外部参加":
-                if ex_member_role:
-                    await interaction.user.add_roles(ex_member_role)
-            else:
-                if member_role:
-                    await interaction.user.add_roles(member_role)
-
-            await restore_channel_permissions(existing, interaction.guild, interaction.user)
-            await existing.send(f"{interaction.user.mention} おかえりなさい！あなたのチャンネルはここです👋")
-            await asyncio.sleep(3)
-            await interaction.channel.delete()
-        else:
-            await interaction.response.send_message(
-                "個人チャンネルが見つかりませんでした。参加区分を選んでチャンネルを作成してください。",
-                ephemeral=True
-            )
+            return
+        external = existing.category and (
+            existing.category.name == "日報_外部参加" or existing.category.name.startswith("日報_外部参加-")
+        )
+        role = discord.utils.get(interaction.guild.roles, name="ex_member" if external else "member")
+        if role:
+            await interaction.user.add_roles(role)
+        await restore_channel_permissions(existing, interaction.guild, interaction.user)
+        await finish_onboarding(interaction, existing, restored=True)
 
     @discord.ui.button(label="← 戻る", style=discord.ButtonStyle.danger, row=2)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -204,30 +132,14 @@ class GradeButton(discord.ui.Button):
         self.category_name = category_name
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
         if existing:
-            await interaction.response.send_message(
-                f"すでに個人チャンネルが作成されています：{existing.mention}",
-                ephemeral=True
-            )
-            return
-
-        # create_personal_channel は複数のDiscord API呼び出しを含み3秒を超えることがあるため、
-        # 先に defer() でインタラクションを確定させてからタイムアウトを回避する
-        await interaction.response.defer()
-
-        await create_personal_channel(interaction.guild, interaction.user, self.category_name)
-        personal_channel = await get_existing_channel(interaction.guild, interaction.user)
-
-        embed = make_embed(
-            step=3,
-            title="✅ 完了！",
-            description=f"個人チャンネルを作成しました！\n{personal_channel.mention} から始めましょう🎉\n\nこのチャンネルは3秒後に自動削除されます。",
-            color=0x57F287
-        )
-        await interaction.edit_original_response(embed=embed, view=None)
-        await asyncio.sleep(3)
-        await interaction.channel.delete()
+            await restore_channel_permissions(existing, interaction.guild, interaction.user)
+            personal_channel = existing
+        else:
+            personal_channel = await create_personal_channel(interaction.guild, interaction.user, self.category_name)
+        await finish_onboarding(interaction, personal_channel, restored=existing is not None)
 
 
 class BackToRoleButton(discord.ui.Button):

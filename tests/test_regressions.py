@@ -17,7 +17,7 @@ async def modules(request, tmp_path, monkeypatch):
     source = Path(__file__).resolve().parents[1] / request.param
     root = tmp_path / request.param
     shutil.copytree(source, root, ignore=shutil.ignore_patterns('data', '__pycache__', '*.log', '.env'))
-    names = ['storage', 'bot_core', 'utils', 'operations', 'stage_context', 'views', 'events', 'commands']
+    names = ['storage', 'bot_core', 'utils', 'operations', 'stage_context', 'onboarding', 'views', 'events', 'commands']
     previous = {n: sys.modules.pop(n) for n in names if n in sys.modules}
     monkeypatch.chdir(root)
     monkeypatch.syspath_prepend(str(root))
@@ -221,3 +221,97 @@ async def test_privacy_permission_failure_does_not_report_success(modules):
     await m.views.SimplePanelView(target_channel=ch).btn_private.callback(inter)
     ch.edit.assert_not_awaited()
     assert '失敗' in inter.followup.send.call_args.args[0]
+
+
+def welcome_interaction():
+    welcome = Mock(spec=discord.TextChannel)
+    welcome.id = 50
+    welcome.category = NS(name='ようこそ')
+    welcome.overwrites_for.return_value = discord.PermissionOverwrite(view_channel=True)
+    welcome.delete = AsyncMock()
+    inter = interaction(welcome)
+    inter.user.mention = '<@7>'
+    return inter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+@pytest.mark.parametrize('route', ['grade', 'external', 'member', 'existing'])
+@pytest.mark.parametrize('registered', [False, True])
+async def test_onboarding_routes_cleanup(modules, monkeypatch, route, registered):
+    m = modules
+    onboarding = importlib.import_module('onboarding')
+    monkeypatch.setattr(onboarding.asyncio, 'sleep', AsyncMock())
+    personal = NS(id=60, mention='#personal', category=None, send=AsyncMock())
+    monkeypatch.setattr(m.views, 'get_existing_channel', AsyncMock(return_value=personal if registered else None))
+    create = AsyncMock(return_value=personal)
+    monkeypatch.setattr(m.views, 'create_personal_channel', create)
+    monkeypatch.setattr(m.views, 'restore_channel_permissions', AsyncMock())
+    inter = welcome_interaction()
+    if route == 'grade':
+        await m.views.GradeButton('A26', '日報_A26', 0).callback(inter)
+    else:
+        view = m.views.RoleSelectView()
+        button = {'external': view.ex_member_button, 'member': view.member_button, 'existing': view.already_have_channel}[route]
+        await button.callback(inter)
+    complete = registered or route in ('grade', 'external')
+    assert inter.channel.delete.await_count == int(complete)
+    if route == 'grade' and registered: create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+@pytest.mark.parametrize('failure', ['notice', 'temporary_delete', 'forbidden', 'missing'])
+async def test_onboarding_cleanup_failures(modules, monkeypatch, failure):
+    onboarding = importlib.import_module('onboarding')
+    monkeypatch.setattr(onboarding.asyncio, 'sleep', AsyncMock())
+    notify = AsyncMock(); monkeypatch.setattr(onboarding, 'notify_admin_error', notify)
+    inter = welcome_interaction()
+    if failure == 'notice': inter.followup.send.side_effect = http_error()
+    if failure == 'temporary_delete': inter.channel.delete.side_effect = [http_error(), None]
+    if failure == 'forbidden': inter.channel.delete.side_effect = http_error(discord.Forbidden)
+    if failure == 'missing': inter.channel.delete.side_effect = http_error(discord.NotFound)
+    await onboarding.finish_onboarding(inter, NS(id=60, mention='#personal'))
+    assert inter.channel.delete.await_count == (2 if failure == 'temporary_delete' else 1)
+    assert notify.await_count == int(failure == 'forbidden')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+@pytest.mark.parametrize('unsafe', ['same_channel', 'other_category', 'other_member'])
+async def test_onboarding_preserves_unrelated_channels(modules, monkeypatch, unsafe):
+    onboarding = importlib.import_module('onboarding')
+    inter = welcome_interaction()
+    personal = NS(id=60, mention='#personal')
+    if unsafe == 'same_channel': personal.id = inter.channel.id
+    if unsafe == 'other_category': inter.channel.category.name = '日報_A26'
+    if unsafe == 'other_member': inter.channel.overwrites_for.return_value.view_channel = None
+    await onboarding.finish_onboarding(inter, personal)
+    inter.channel.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+async def test_creation_survives_optional_post_and_index_failures(modules, monkeypatch):
+    utils = importlib.import_module('utils')
+    category = NS(id=3)
+    channel = NS(id=60, set_permissions=AsyncMock(), send=AsyncMock(side_effect=http_error()))
+    member = Mock(); member.id = 7; member.name = 'test'; member.mention = '<@7>'
+    guild = NS(default_role=Mock(), roles=[], create_text_channel=AsyncMock(return_value=channel))
+    monkeypatch.setattr(utils, 'get_or_create_available_category', AsyncMock(return_value=category))
+    monkeypatch.setattr(utils, 'update_channel_index', AsyncMock(side_effect=http_error()))
+    result = await utils.create_personal_channel(guild, member, '日報_A26')
+    assert result is channel
+    assert modules.storage.load_data() == {'7': '60'}
+    assert channel.send.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+async def test_incomplete_creation_keeps_welcome(modules, monkeypatch):
+    monkeypatch.setattr(modules.views, 'get_existing_channel', AsyncMock(return_value=None))
+    monkeypatch.setattr(modules.views, 'create_personal_channel', AsyncMock(side_effect=http_error()))
+    inter = welcome_interaction()
+    with pytest.raises(discord.HTTPException):
+        await modules.views.GradeButton('A26', '日報_A26', 0).callback(inter)
+    inter.channel.delete.assert_not_awaited()
