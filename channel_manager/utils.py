@@ -16,7 +16,7 @@ from storage import (
     MAX_CHANNELS_PER_CATEGORY,
     HIDDEN_RETENTION_DAYS,
 )
-from bot_core import ADMIN_ID
+from bot_core import ADMIN_ID, logger
 
 
 def get_channel_owner_id(channel_id: int) -> int | None:
@@ -379,18 +379,22 @@ async def create_personal_channel(guild, member, category_name):
         ),
         color=0x57F287
     )
-    await channel.send(content=member.mention, embed=welcome_embed)
-
-    # チャンネル設定パネルを同時に設置(お気に入り登録などをボタンで完結できるようにする)
-    # ChannelSettingsView は views.py 側にあり、views.py はこの utils.py をトップレベルで
-    # importしているため、ここでトップレベルimportすると循環importになってしまう。
-    # 呼び出し時点（関数の中）でimportすることで、両モジュールの読み込みが終わった後に
-    # 解決されるようにしている。
+    # 投稿・一覧更新は補助処理。登録済みチャンネルの返却を妨げない。
     from views import ChannelSettingsView
-    await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
+    try:
+        await channel.send(content=member.mention, embed=welcome_embed)
+    except discord.HTTPException:
+        logger.exception("個人チャンネル %s の歓迎文投稿に失敗しました。", channel.id)
+    try:
+        await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
+    except discord.HTTPException:
+        logger.exception("個人チャンネル %s の設定パネル投稿に失敗しました。", channel.id)
+    try:
+        await update_channel_index(guild, category)
+    except discord.HTTPException:
+        logger.exception("個人チャンネル %s の一覧更新に失敗しました。", channel.id)
+    return channel
 
-    # チャンネル一覧indexを更新
-    await update_channel_index(guild, category)
 
 async def hide_channel_from_others(channel, guild, user_id):
     """管理者（ADMIN_ID）以外の全ユーザー・ロールからチャンネルを見えなくし、

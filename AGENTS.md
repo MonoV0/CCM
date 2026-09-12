@@ -4,6 +4,7 @@
 - 独立した2つのDiscord bot。`stage_bot/` と `channel_manager/` は別プロセス。
 - 各 `bot.py` は起動入口、`bot_core.py` は環境変数・ログ・Bot生成。
 - `commands.py` はスラッシュコマンド、`events.py` はイベントと定期処理。
+- 入室完了後の案内用チャンネル削除は `channel_manager/onboarding.py`。
 - `views.py` はUI、`storage.py` はJSON保存、`utils.py` は補助処理。
 - ステージの削除・公開切り替え・ブロック判定は `stage_bot/operations.py`。
 - ステージUIの対象指定と権限チェックは `stage_bot/stage_context.py`。
