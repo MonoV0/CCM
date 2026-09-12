@@ -100,7 +100,7 @@ async def stage_panel(interaction: discord.Interaction):
         ),
         color=discord.Color.blurple()
     )
-    await interaction.response.send_message(embed=embed, view=StageConsoleView(), ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=StageConsoleView(target_channel=channel), ephemeral=True)
 
 
 @bot.tree.command(name="stage-reaction", description="リアクションピッカーを開きます。自分がいるステージチャットに絵文字を送れます。")

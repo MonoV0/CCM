@@ -8,6 +8,8 @@ from typing import Optional
 import discord
 from discord import app_commands
 
+from operations import maybe_delete_temp_channel
+
 import bot_core
 from bot_core import bot, log, notify_owner_error
 from storage import guild_config, temp_channels, save_temp_channels, DEFAULT_NAME_TEMPLATE, DEFAULT_TOPIC_TEMPLATE
@@ -53,11 +55,7 @@ async def on_ready():
             temp_channels.pop(channel_id_str, None)
             continue
         if isinstance(channel, discord.StageChannel) and len(channel.members) == 0:
-            try:
-                await channel.delete(reason="再起動時クリーンアップ")
-            except discord.HTTPException:
-                pass
-            temp_channels.pop(channel_id_str, None)
+            await maybe_delete_temp_channel(channel)
     save_temp_channels()
 
     # 起動時に所有者へ通知。クラッシュ→再起動を繰り返している場合はDMが連続で届くので気づきやすい。
@@ -169,24 +167,6 @@ async def create_temp_stage(member: discord.Member, config: dict) -> Optional[di
         pass
 
     return stage_channel
-
-
-async def maybe_delete_temp_channel(channel: discord.abc.GuildChannel, force: bool = False) -> None:
-    channel_id_str = str(channel.id)
-    if channel_id_str not in temp_channels:
-        return
-    if not isinstance(channel, discord.StageChannel):
-        return
-    if not force and len(channel.members) > 0:
-        return
-
-    try:
-        await channel.delete(reason="一時ステージの自動削除または終了ボタン")
-    except discord.HTTPException:
-        pass
-    finally:
-        temp_channels.pop(channel_id_str, None)
-        save_temp_channels()
 
 
 @bot.event

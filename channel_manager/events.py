@@ -75,8 +75,11 @@ async def cleanup_expired_hidden_channels():
             if channel:
                 try:
                     await channel.delete(reason=f"非表示化から{HIDDEN_RETENTION_DAYS}日経過による自動削除")
+                except discord.NotFound:
+                    pass  # Discord側で既に削除済み
                 except Exception:
-                    pass
+                    logger.exception("非表示チャンネル %s の削除に失敗。次回再試行します。", channel_id)
+                    continue
             # チャンネルが既に手動削除されている場合も含めて記録を掃除
             expired_ids.append(channel_id)
             # メインの紐付けデータにも残っていれば削除

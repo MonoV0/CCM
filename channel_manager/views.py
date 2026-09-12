@@ -498,13 +498,18 @@ class DeleteMyDataConfirmView(discord.ui.View):
         guild = interaction.guild
         member = interaction.user
 
+        await interaction.response.defer()
         category = self.channel.category
         try:
             await self.channel.delete(reason="本人による自己データ削除")
-            if category:
-                await update_channel_index(guild, category)
-        except Exception:
-            pass
+        except discord.NotFound:
+            pass  # 既に削除されていれば登録データの削除を続行する
+        except discord.HTTPException:
+            await interaction.edit_original_response(
+                content="❌ チャンネルを削除できませんでした。登録データは保持しています。時間を置くかBotの権限を確認して再試行してください。",
+                view=None,
+            )
+            return
 
         data = load_data()
         user_id = str(member.id)
@@ -518,6 +523,12 @@ class DeleteMyDataConfirmView(discord.ui.View):
             del hidden_data[channel_id]
             save_hidden_data(hidden_data)
 
+        if category:
+            try:
+                await update_channel_index(guild, category)
+            except discord.HTTPException:
+                pass  # 一覧更新の失敗を、削除の失敗として扱わない
+
         member_role = discord.utils.get(guild.roles, name="member")
         ex_member_role = discord.utils.get(guild.roles, name="ex_member")
         if member_role in member.roles:
@@ -525,7 +536,7 @@ class DeleteMyDataConfirmView(discord.ui.View):
         if ex_member_role in member.roles:
             await member.remove_roles(ex_member_role)
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content="✅ あなたのチャンネルと登録データを完全に削除しました。サーバー自体は継続して利用できます。",
             view=None
         )
