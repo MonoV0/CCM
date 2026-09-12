@@ -5,6 +5,9 @@ discord.ui のモーダル・ビュー定義まとめ。
 """
 import re
 
+from operations import is_blocked, maybe_delete_temp_channel, toggle_privacy
+from stage_context import StageView, StageModal
+
 import discord
 
 from storage import temp_channels, user_presets, save_temp_channels, save_presets
@@ -35,6 +38,10 @@ class JoinPasswordModal(discord.ui.Modal, title="パスワード入力"):
             await interaction.followup.send("❌ このステージは既に終了しているか、無効です。", ephemeral=True)
             return
             
+        if is_blocked(self.target_channel.id, interaction.user.id):
+            await interaction.followup.send("❌ このステージへの参加はブロックされています。", ephemeral=True)
+            return
+
         correct_pwd = temp_channels[channel_id_str].get("password")
         if not correct_pwd:
             await interaction.followup.send("ℹ️ このステージには現在パスワードが設定されていません。", ephemeral=True)
@@ -132,10 +139,10 @@ class SendInvitePanelView(discord.ui.View):
 # ==========================================
 # コンソール用 UI (Modal)
 # ==========================================
-class StageEditModal(discord.ui.Modal):
-    def __init__(self, edit_type: str):
+class StageEditModal(StageModal):
+    def __init__(self, edit_type: str, target_channel=None):
         title = "チャンネル名の変更" if edit_type == "name" else "トピックの変更"
-        super().__init__(title=title)
+        super().__init__(title=title, target_channel=target_channel)
         self.edit_type = edit_type
         self.input_field = discord.ui.TextInput(
             label="新しい名前" if edit_type == "name" else "新しいトピック",
@@ -146,7 +153,7 @@ class StageEditModal(discord.ui.Modal):
         self.add_item(self.input_field)
 
     async def on_submit(self, interaction: discord.Interaction):
-        channel = interaction.channel
+        channel = self.get_channel(interaction)
         new_val = self.input_field.value.strip()
         await interaction.response.defer(ephemeral=True)
         try:
@@ -170,7 +177,7 @@ class StageEditModal(discord.ui.Modal):
             await interaction.followup.send("❌ 変更に失敗しました。※Discordの制限により名前の変更は10分間に2回までです。", ephemeral=True)
 
 
-class StageLimitModal(discord.ui.Modal, title="参加人数の制限"):
+class StageLimitModal(StageModal, title="参加人数の制限"):
     input_field = discord.ui.TextInput(
         label="最大人数 (0 で無制限)", style=discord.TextStyle.short, required=True, max_length=5
     )
@@ -185,14 +192,14 @@ class StageLimitModal(discord.ui.Modal, title="参加人数の制限"):
 
         await interaction.response.defer(ephemeral=True)
         try:
-            await interaction.channel.edit(user_limit=limit)
+            await self.get_channel(interaction).edit(user_limit=limit)
             msg = f"✅ 参加人数制限を「{limit}人」に設定しました。" if limit > 0 else "✅ 参加人数制限を「無制限」にしました。"
             await interaction.followup.send(msg, ephemeral=True)
         except Exception:
             await interaction.followup.send("❌ エラーが発生しました。", ephemeral=True)
 
 
-class StagePasswordModal(discord.ui.Modal, title="パスワードの設定"):
+class StagePasswordModal(StageModal, title="パスワードの設定"):
     pwd_field = discord.ui.TextInput(
         label="パスワード (空欄でロック解除)",
         style=discord.TextStyle.short,
@@ -203,7 +210,7 @@ class StagePasswordModal(discord.ui.Modal, title="パスワードの設定"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        channel = interaction.channel
+        channel = self.get_channel(interaction)
         new_pwd = self.pwd_field.value.strip()
         channel_id_str = str(channel.id)
         
@@ -311,83 +318,43 @@ class DeleteConfirmView(discord.ui.View):
         else:
             await interaction.followup.send("ℹ️ 保存するチャット履歴がありませんでした。ステージを終了します...", ephemeral=True)
             
-        await maybe_delete_temp_channel(self.target_channel, force=True)
+        if not await maybe_delete_temp_channel(self.target_channel, force=True):
+            await interaction.followup.send("❌ ステージを削除できませんでした。時間を置くかBotの権限を確認して再試行してください。", ephemeral=True)
 
     @discord.ui.button(label="そのまま終了", style=discord.ButtonStyle.danger, emoji="🗑️")
     async def btn_delete_only(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         await interaction.followup.send("✅ ステージを終了します...", ephemeral=True)
-        await maybe_delete_temp_channel(self.target_channel, force=True)
+        if not await maybe_delete_temp_channel(self.target_channel, force=True):
+            await interaction.followup.send("❌ ステージを削除できませんでした。時間を置くかBotの権限を確認して再試行してください。", ephemeral=True)
 
 
 # ==========================================
 # メインのコントロールパネル（隠しメニュー）
 # ==========================================
-class StageConsoleView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        channel = interaction.channel
-        if not isinstance(channel, discord.StageChannel): return False
-        channel_id_str = str(channel.id)
-        is_owner = channel.permissions_for(interaction.user).manage_channels
-        is_sub_admin = interaction.user.id in temp_channels.get(channel_id_str, {}).get("sub_admins", [])
-        if not (is_owner or is_sub_admin):
-            await interaction.response.send_message("⚠️ この操作を行えるのはステージ作成者またはサブ管理者のみです。", ephemeral=True)
-            return False
-        return True
+class StageConsoleView(StageView):
+    def __init__(self, target_channel=None):
+        super().__init__(timeout=None, target_channel=target_channel)
 
     @discord.ui.button(label="名前を変更", style=discord.ButtonStyle.primary, custom_id="console_btn_name", emoji="📝", row=0)
     async def btn_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(StageEditModal("name"))
+        await interaction.response.send_modal(StageEditModal("name", target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="トピックを変更", style=discord.ButtonStyle.success, custom_id="console_btn_topic", emoji="📢", row=0)
     async def btn_topic(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(StageEditModal("topic"))
+        await interaction.response.send_modal(StageEditModal("topic", target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="人数制限", style=discord.ButtonStyle.secondary, custom_id="console_btn_limit", emoji="👥", row=0)
     async def btn_limit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(StageLimitModal())
+        await interaction.response.send_modal(StageLimitModal(target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="公開/非公開", style=discord.ButtonStyle.secondary, custom_id="console_btn_private", emoji="🔒", row=1)
     async def btn_private(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        channel = interaction.channel
-        guild = interaction.guild
-        default_role = guild.default_role
-
-        overwrite = channel.overwrites_for(default_role)
-        is_private = overwrite.view_channel is False
-
-        if is_private:
-            overwrite.view_channel = True
-            overwrite.connect = True
-            overwrite.stream = True
-            new_name = channel.name
-            if new_name.startswith("🔒"):
-                new_name = new_name.replace("🔒", "", 1).strip()
-            try:
-                await channel.edit(name=new_name[:100])
-                await channel.set_permissions(default_role, overwrite=overwrite)
-                await interaction.followup.send("🔓 ステージを**公開**に変更しました。", ephemeral=True)
-            except discord.HTTPException:
-                await interaction.followup.send("❌ 変更に失敗しました。(10分制限の可能性)", ephemeral=True)
-        else:
-            overwrite.view_channel = False
-            new_name = channel.name
-            if not new_name.startswith("🔒"):
-                new_name = f"🔒{new_name}"
-            try:
-                await channel.edit(name=new_name[:100])
-                await channel.set_permissions(default_role, overwrite=overwrite)
-                await interaction.followup.send("🔒 ステージを**非公開**に変更しました。", ephemeral=True)
-            except discord.HTTPException:
-                await interaction.followup.send("❌ 変更に失敗しました。(10分制限の可能性)", ephemeral=True)
+        await toggle_privacy(interaction, self.get_channel(interaction))
 
     @discord.ui.button(label="パスワード", style=discord.ButtonStyle.secondary, custom_id="console_btn_password", emoji="🔐", row=1)
     async def btn_password(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(StagePasswordModal())
+        await interaction.response.send_modal(StagePasswordModal(target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="ステージ終了", style=discord.ButtonStyle.danger, custom_id="console_btn_delete", emoji="🗑️", row=1)
     async def btn_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -396,13 +363,13 @@ class StageConsoleView(discord.ui.View):
             description="本当にステージを終了して削除しますか？\n終了する前にチャット履歴をダウンロードできます。",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed, view=DeleteConfirmView(interaction.channel), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=DeleteConfirmView(self.get_channel(interaction)), ephemeral=True)
 
     @discord.ui.button(label="ブロック＆キック", style=discord.ButtonStyle.danger, custom_id="console_btn_block", emoji="🚫", row=2)
     async def btn_block(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "## 🚫 ブロック＆キック管理\nキックしたメンバーはステージから退出させられ、再入室が禁止されます。",
-            view=BlockMenuView(interaction.channel), ephemeral=True
+            view=BlockMenuView(self.get_channel(interaction)), ephemeral=True
         )
 
     @discord.ui.button(label="マイ・プリセット", style=discord.ButtonStyle.primary, custom_id="console_btn_preset", emoji="📌", row=2)
@@ -412,12 +379,12 @@ class StageConsoleView(discord.ui.View):
         count_text = f"（現在 {len(presets)}/{MAX_PRESETS} 件保存中）"
         await interaction.response.send_message(
             f"## 📌 マイ・プリセット {count_text}\nステージ名・トピック・人数制限のセットを保存して、ワンクリックで適用できます。",
-            view=PresetMenuView(user_id_str), ephemeral=True
+            view=PresetMenuView(user_id_str, target_channel=self.get_channel(interaction)), ephemeral=True
         )
 
     @discord.ui.button(label="サブ管理者", style=discord.ButtonStyle.secondary, custom_id="console_btn_subadmin", emoji="👑", row=2)
     async def btn_subadmin(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel_id_str = str(interaction.channel.id)
+        channel_id_str = str(self.get_channel(interaction).id)
         sub_admins = temp_channels.get(channel_id_str, {}).get("sub_admins", [])
         guild = interaction.guild
         mentions = []
@@ -427,7 +394,7 @@ class StageConsoleView(discord.ui.View):
         current = f"\n現在のサブ管理者: {', '.join(mentions)}" if mentions else "\n現在サブ管理者はいません。"
         await interaction.response.send_message(
             f"## 👑 サブ管理者（共同ホスト）管理{current}\nサブ管理者はコントロールパネルの全機能を使用できます。",
-            view=SubAdminView(interaction.channel), ephemeral=True
+            view=SubAdminView(self.get_channel(interaction)), ephemeral=True
         )
 
     @discord.ui.button(label="簡易パネル", style=discord.ButtonStyle.secondary, custom_id="console_btn_simple", emoji="📲", row=3)
@@ -437,29 +404,29 @@ class StageConsoleView(discord.ui.View):
             description="よく使う操作だけをまとめたシンプルモードです。\n*(※このパネルはあなたにしか見えていません)*",
             color=discord.Color.green()
         )
-        await interaction.response.send_message(embed=embed, view=SimplePanelView(), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=SimplePanelView(target_channel=self.get_channel(interaction)), ephemeral=True)
 
     @discord.ui.button(label="チケット招待", style=discord.ButtonStyle.primary, custom_id="console_btn_ticket", emoji="🎟️", row=3)
     async def btn_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel_id_str = str(interaction.channel.id)
+        channel_id_str = str(self.get_channel(interaction).id)
         ticket_count = len(temp_channels.get(channel_id_str, {}).get("tickets", {}))
         await interaction.response.send_message(
             f"## 🎟️ 使い捨てチケット招待\n"
             f"特定の人だけを招待する「使い捨てチケット」を発行できます。\n"
             f"相手は `/stage-ticket` コマンドでコードを入力するだけで入室できます。\n"
             f"現在の発行枚数: **{ticket_count}/20**",
-            view=TicketIssueView(interaction.channel), ephemeral=True
+            view=TicketIssueView(self.get_channel(interaction)), ephemeral=True
         )
 
     @discord.ui.button(label="配信告知", style=discord.ButtonStyle.success, custom_id="console_btn_stream", emoji="📺", row=3)
     async def btn_stream(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(StreamAnnounceModal())
+        await interaction.response.send_modal(StreamAnnounceModal(target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="リアクションパネル再送", style=discord.ButtonStyle.secondary, custom_id="console_btn_reaction_resend", emoji="🎉", row=3)
     async def btn_reaction_resend(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
-            await interaction.channel.send(
+            await self.get_channel(interaction).send(
                 "🎉 **リアクションパネル**\n好きなタイミングでボタンを押してください！",
                 view=SummonAndReactionView()
             )
@@ -472,7 +439,7 @@ class StageConsoleView(discord.ui.View):
         min_values=1, max_values=25, row=4, custom_id="console_select_invite"
     )
     async def select_invite(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        channel = interaction.channel
+        channel = self.get_channel(interaction)
         await interaction.response.defer(ephemeral=True)
         added_users = []
         for user in select.values:
@@ -634,7 +601,7 @@ class BlockMenuView(discord.ui.View):
 # ==========================================
 MAX_PRESETS = 5
 
-class PresetSaveModal(discord.ui.Modal, title="プリセットを保存"):
+class PresetSaveModal(StageModal, title="プリセットを保存"):
     label_field = discord.ui.TextInput(
         label="プリセット名（例: 雑談ステージ）",
         style=discord.TextStyle.short, required=True, max_length=30
@@ -655,7 +622,7 @@ class PresetSaveModal(discord.ui.Modal, title="プリセットを保存"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         user_id_str = str(interaction.user.id)
-        channel = interaction.channel
+        channel = self.get_channel(interaction)
 
         presets = user_presets.get(user_id_str, [])
         if len(presets) >= MAX_PRESETS:
@@ -713,7 +680,7 @@ class PresetApplySelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
         idx = int(self.values[0])
         preset = self.presets[idx]
-        channel = interaction.channel
+        channel = self.view.get_channel(interaction)
 
         results = []
         try:
@@ -770,15 +737,15 @@ class PresetDeleteSelect(discord.ui.Select):
         await interaction.followup.send(f"🗑️ プリセット「{removed['label']}」を削除しました。", ephemeral=True)
 
 
-class PresetMenuView(discord.ui.View):
+class PresetMenuView(StageView):
     """プリセット操作の選択メニュー"""
-    def __init__(self, user_id_str: str):
-        super().__init__(timeout=120)
+    def __init__(self, user_id_str: str, target_channel=None):
+        super().__init__(timeout=120, target_channel=target_channel)
         self.user_id_str = user_id_str
 
     @discord.ui.button(label="プリセットを保存", style=discord.ButtonStyle.primary, emoji="💾")
     async def btn_save(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(PresetSaveModal())
+        await interaction.response.send_modal(PresetSaveModal(target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="プリセットを適用", style=discord.ButtonStyle.success, emoji="▶️")
     async def btn_apply(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -786,7 +753,7 @@ class PresetMenuView(discord.ui.View):
         if not presets:
             await interaction.response.send_message("ℹ️ 保存されているプリセットがありません。先に保存してください。", ephemeral=True)
             return
-        view = discord.ui.View(timeout=120)
+        view = StageView(timeout=120, target_channel=self.get_channel(interaction))
         view.add_item(PresetApplySelect(presets))
         await interaction.response.send_message("適用するプリセットを選択してください：", view=view, ephemeral=True)
 
@@ -796,7 +763,7 @@ class PresetMenuView(discord.ui.View):
         if not presets:
             await interaction.response.send_message("ℹ️ 削除できるプリセットがありません。", ephemeral=True)
             return
-        view = discord.ui.View(timeout=120)
+        view = StageView(timeout=120, target_channel=self.get_channel(interaction))
         view.add_item(PresetDeleteSelect(self.user_id_str, presets[:]))
         await interaction.response.send_message("削除するプリセットを選択してください：", view=view, ephemeral=True)
 
@@ -948,61 +915,24 @@ class SubAdminRemoveView(discord.ui.View):
 # ==========================================
 # 📲 モバイル向け簡易パネル
 # ==========================================
-class SimplePanelView(discord.ui.View):
+class SimplePanelView(StageView):
     """ボタン4つに絞ったシンプルモード。モバイルでも押しやすい。"""
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        channel = interaction.channel
-        if not isinstance(channel, discord.StageChannel):
-            return False
-        channel_id_str = str(channel.id)
-        is_owner = channel.permissions_for(interaction.user).manage_channels
-        is_sub_admin = interaction.user.id in temp_channels.get(channel_id_str, {}).get("sub_admins", [])
-        if not (is_owner or is_sub_admin):
-            await interaction.response.send_message("⚠️ この操作を行えるのはステージ作成者またはサブ管理者のみです。", ephemeral=True)
-            return False
-        return True
+    def __init__(self, target_channel=None):
+        super().__init__(timeout=None, target_channel=target_channel)
 
     @discord.ui.button(label="名前を変更", style=discord.ButtonStyle.primary, custom_id="simple_btn_name", emoji="📝", row=0)
     async def btn_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(StageEditModal("name"))
+        await interaction.response.send_modal(StageEditModal("name", target_channel=self.get_channel(interaction)))
 
     @discord.ui.button(label="公開 / 非公開", style=discord.ButtonStyle.secondary, custom_id="simple_btn_private", emoji="🔒", row=0)
     async def btn_private(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        channel = interaction.channel
-        guild = interaction.guild
-        default_role = guild.default_role
-        overwrite = channel.overwrites_for(default_role)
-        is_private = overwrite.view_channel is False
-        if is_private:
-            overwrite.view_channel = True
-            overwrite.connect = True
-            overwrite.stream = True
-            new_name = channel.name.replace("🔒", "", 1).strip() if channel.name.startswith("🔒") else channel.name
-            try:
-                await channel.edit(name=new_name[:100])
-                await channel.set_permissions(default_role, overwrite=overwrite)
-                await interaction.followup.send("🔓 **公開**に変更しました。", ephemeral=True)
-            except discord.HTTPException:
-                await interaction.followup.send("❌ 変更に失敗しました。(10分制限の可能性)", ephemeral=True)
-        else:
-            overwrite.view_channel = False
-            new_name = channel.name if channel.name.startswith("🔒") else f"🔒{channel.name}"
-            try:
-                await channel.edit(name=new_name[:100])
-                await channel.set_permissions(default_role, overwrite=overwrite)
-                await interaction.followup.send("🔒 **非公開**に変更しました。", ephemeral=True)
-            except discord.HTTPException:
-                await interaction.followup.send("❌ 変更に失敗しました。(10分制限の可能性)", ephemeral=True)
+        await toggle_privacy(interaction, self.get_channel(interaction))
 
     @discord.ui.button(label="メンバーを招待", style=discord.ButtonStyle.success, custom_id="simple_btn_invite", emoji="👤", row=1)
     async def btn_invite(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "招待するメンバーを選んでください。",
-            view=SimpleInviteView(interaction.channel), ephemeral=True
+            view=SimpleInviteView(self.get_channel(interaction)), ephemeral=True
         )
 
     @discord.ui.button(label="ステージ終了", style=discord.ButtonStyle.danger, custom_id="simple_btn_delete", emoji="🗑️", row=1)
@@ -1012,7 +942,7 @@ class SimplePanelView(discord.ui.View):
             description="本当にステージを終了して削除しますか？",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed, view=DeleteConfirmView(interaction.channel), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=DeleteConfirmView(self.get_channel(interaction)), ephemeral=True)
 
 
 class SimpleInviteView(discord.ui.View):
@@ -1148,6 +1078,10 @@ class TicketJoinModal(discord.ui.Modal, title="チケットで入室"):
             await interaction.followup.send("❌ チケットが見つかりません。コードを確認してください。", ephemeral=True)
             return
 
+        if is_blocked(matched_channel.id, interaction.user.id):
+            await interaction.followup.send("❌ このステージへの参加はブロックされています。", ephemeral=True)
+            return
+
         if ticket_info.get("used"):
             await interaction.followup.send("❌ このチケットは既に使用済みです。", ephemeral=True)
             return
@@ -1168,13 +1102,15 @@ class TicketJoinModal(discord.ui.Modal, title="チケットで入室"):
                 ephemeral=True
             )
         except discord.HTTPException:
-            await interaction.followup.send("❌ 権限の付与に失敗しました。", ephemeral=True)
+            ticket_info["used"] = False
+            save_temp_channels()
+            await interaction.followup.send("❌ 権限の付与に失敗しました。チケットは再利用できます。", ephemeral=True)
 
 
 # ==========================================
 # 📺 同時配信告知連携
 # ==========================================
-class StreamAnnounceModal(discord.ui.Modal, title="同時配信の告知"):
+class StreamAnnounceModal(StageModal, title="同時配信の告知"):
     url_field = discord.ui.TextInput(
         label="配信URL",
         style=discord.TextStyle.short,
@@ -1201,7 +1137,7 @@ class StreamAnnounceModal(discord.ui.Modal, title="同時配信の告知"):
 
         icon, platform_name = detect_platform(url)
         comment = self.comment_field.value.strip()
-        channel = interaction.channel
+        channel = self.get_channel(interaction)
 
         view = StreamAnnounceSendView(url=url, icon=icon, platform_name=platform_name,
                                       comment=comment, stage_channel=channel,

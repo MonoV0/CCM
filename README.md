@@ -278,3 +278,14 @@ python bot.py
   影響しません。障害切り分けの際は、それぞれの`bot_errors.log`（`stage_bot/data/` と
   `channel_manager/`直下）やスラッシュコマンド（`/stage-recent-errors` / `/recent_errors`）で
   個別に確認してください。
+
+## 開発時の検証
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q tests
+```
+
+回帰テストは一時フォルダとDiscord APIのモックを使用し、本番のBotや保存データには接続しません。
+コードの確認箇所は `AGENTS.md` にまとめています。ステージの共通操作は `operations.py`、
+UIの操作対象と権限確認は `stage_context.py` に分離しています。
