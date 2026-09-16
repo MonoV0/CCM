@@ -18,7 +18,12 @@ from storage import (
     load_starred_data,
     save_starred_data,
 )
-from bot_core import bot, ADMIN_ID
+from bot_core import bot, ADMIN_ID, logger
+from storage import load_invite_requests
+from invitations import (
+    InviteError, new_request, transition, decide, request_embed,
+    issue_invite, deliver_invite, send_dm,
+)
 from utils import (
     create_personal_channel,
     delete_favorites_category_if_empty,
@@ -248,53 +253,121 @@ async def perform_reset(interaction: discord.Interaction, member: discord.Member
         pass
 
 class InviteModal(discord.ui.Modal, title="招待申請"):
-    name = discord.ui.TextInput(label="招待したい人の名前", placeholder="例：山田太郎")
+    name = discord.ui.TextInput(label="招待対象のDiscord username", placeholder="表示名ではなくusernameを入力", max_length=32, required=True)
+    user_id = discord.ui.TextInput(label="招待対象のUser ID", placeholder="開発者モードで相手を右クリック → ユーザーIDをコピー", min_length=17, max_length=20, required=True)
     reason = discord.ui.TextInput(
-        label="どんな人か教えてください",
-        style=discord.TextStyle.paragraph,
-        placeholder="例：同じゼミの友人で、デジハリに興味があります"
+        label="どんな人物か・あなたとの関係", style=discord.TextStyle.paragraph,
+        placeholder="例：同じ大学の友人で、○○の活動を一緒にしています", max_length=500, required=True,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        admin = await bot.fetch_user(ADMIN_ID)
-        embed = discord.Embed(title="📨 招待申請が届きました", color=0x5865F2)
-        embed.add_field(name="申請者", value=interaction.user.mention, inline=False)
-        embed.add_field(name="招待したい人", value=self.name.value, inline=False)
-        embed.add_field(name="説明", value=self.reason.value, inline=False)
-
-        view = ApprovalView(
-            guild_id=interaction.guild.id,
-            applicant_id=interaction.user.id,
-            invitee_name=self.name.value
-        )
-        await admin.send(embed=embed, view=view)
-        await interaction.response.send_message("申請を送信しました！承認されたら招待リンクをDMでお送りします。", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        request_id = None
+        try:
+            if interaction.guild is None:
+                raise InviteError("サーバー内で実行してください。")
+            username, relationship = self.name.value.strip().lstrip("@"), self.reason.value.strip()
+            raw_id = self.user_id.value.strip()
+            if not username or not relationship:
+                raise InviteError("usernameと人物・関係性の説明は必須です。")
+            if not raw_id.isascii() or not raw_id.isdecimal() or not 17 <= len(raw_id) <= 20 or not 0 < int(raw_id) < 2**64:
+                raise InviteError("対象者の正しいUser IDを入力してください。")
+            target = await bot.fetch_user(int(raw_id))
+            if target.bot or target.id == interaction.user.id:
+                raise InviteError("Botや自分自身は招待対象にできません。")
+            if target.name.casefold() != username.casefold():
+                raise InviteError("入力usernameとUser IDのアカウントが一致しません。相手のプロフィールで確認してください。")
+            request_id, record = new_request(interaction.guild.id, interaction.user.id, target, username, relationship)
+            admin = await bot.fetch_user(ADMIN_ID)
+            # 保存成功前は承認ボタンを公開しない。
+            message = await admin.send(embed=request_embed(request_id, record), allowed_mentions=discord.AllowedMentions.none())
+            record = transition(request_id, {"submitting"}, "pending", message_id=message.id)
+            await message.edit(embed=request_embed(request_id, record), view=ApprovalView(request_id))
+            await interaction.followup.send(
+                f"申請を送信しました。承認後は対象者本人へのDMを試みます。\n申請ID: `{request_id}`\n"
+                "DMできない場合のみ転送が必要です。`/invite_status` で状態と承認済みリンクを確認できます。", ephemeral=True,
+            )
+        except InviteError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+        except Exception as error:
+            logger.error("招待申請 %s で %s", request_id, type(error).__name__)
+            await interaction.followup.send(
+                "申請送信を完了できませんでした。招待は発行していません。`/invite_status` を確認し、管理者へ連絡してください。", ephemeral=True,
+            )
 
 
 class ApprovalView(discord.ui.View):
-    def __init__(self, guild_id, applicant_id, invitee_name):
+    def __init__(self, request_id):
         super().__init__(timeout=None)
-        self.guild_id = guild_id
-        self.applicant_id = applicant_id
-        self.invitee_name = invitee_name
+        self.request_id = request_id
+        self.approve.custom_id = f"ccm:invite:{request_id}:approve"
+        self.reject.custom_id = f"ccm:invite:{request_id}:reject"
 
-    @discord.ui.button(label="✅ 承認", style=discord.ButtonStyle.success)
+    async def decide_request(self, interaction, approved):
+        if interaction.user.id != ADMIN_ID:
+            await interaction.response.send_message("管理者のみ操作できます。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            record = decide(self.request_id, interaction.user.id, interaction.message.id, approved)
+        except InviteError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
+        except Exception as error:
+            logger.error("招待審査 %s の保存失敗: %s", self.request_id, type(error).__name__)
+            await interaction.followup.send("申請記録を確認できないため停止しました。招待は発行していません。", ephemeral=True)
+            return
+
+        try:
+            embed = request_embed(self.request_id, record)
+            embed.add_field(name="審査者", value=f"<@{record['reviewer_id']}>", inline=False)
+            await interaction.message.edit(
+                content="✅ 承認済み・発行処理中" if approved else "❌ 却下しました", embed=embed, view=None,
+            )
+        except Exception:
+            logger.warning("招待 %s の審査画面更新失敗（判断結果は保存済み）", self.request_id)
+
+        if approved:
+            try:
+                record = await issue_invite(self.request_id, record)
+            except Exception as error:
+                detail = str(error) if isinstance(error, InviteError) else type(error).__name__
+                logger.error("招待発行 %s は停止: %s", self.request_id, detail)
+                await interaction.followup.send(
+                    f"申請 `{self.request_id}` の発行・制限確認に失敗しました。リンクは配布せず、再発行を禁止しました。記録とDiscordの招待一覧を確認してください。", ephemeral=True,
+                )
+                return
+            try:
+                direct, notified = await deliver_invite(self.request_id, record)
+                result = "✅ 承認済み：本人へDM送信済み" if direct else "✅ 承認済み：本人へDM不可。申請者による転送が必要です"
+                if not notified:
+                    result += "。申請者へのDMも失敗。/invite_status から同じリンクを取得できます"
+            except Exception as error:
+                logger.error("招待配送 %s は停止: %s", self.request_id, type(error).__name__)
+                result = "✅ 承認・発行済み。配送を完了できませんでした。/invite_status で確認してください"
+        else:
+            result = "❌ 却下しました"
+            try:
+                await send_dm(record["applicant_id"], f"❌ 招待申請 `{self.request_id}`（対象ID: {record['target_id']}）は却下されました。")
+            except Exception:
+                result += "（申請者への通知失敗）"
+        # 元の説明と承認対象を残し、判断者・結果を追跡できるようにする。
+        try:
+            record = load_invite_requests()[self.request_id]
+            embed = request_embed(self.request_id, record)
+            embed.add_field(name="審査者", value=f"<@{record['reviewer_id']}>", inline=False)
+            await interaction.message.edit(content=result, embed=embed, view=None)
+        except Exception:
+            logger.warning("招待 %s の審査画面更新失敗（判断結果は保存済み）", self.request_id)
+        await interaction.followup.send(result, ephemeral=True)
+
+    @discord.ui.button(label="✅ 承認", style=discord.ButtonStyle.success, custom_id="ccm:invite:approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = bot.get_guild(self.guild_id)
-        channel = guild.text_channels[0]
-        invite = await channel.create_invite(max_uses=1, max_age=86400, unique=True)
+        await self.decide_request(interaction, True)
 
-        applicant = await bot.fetch_user(self.applicant_id)
-        await applicant.send(
-            f"✅ 招待申請が承認されました！\n**{self.invitee_name}** さんに以下のリンクを送ってください。\n\n{invite.url}\n\n※このリンクは1回限り・24時間有効です。"
-        )
-        await interaction.response.edit_message(content=f"✅ 承認しました（{self.invitee_name}）", view=None)
-
-    @discord.ui.button(label="❌ 却下", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ 却下", style=discord.ButtonStyle.danger, custom_id="ccm:invite:reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        applicant = await bot.fetch_user(self.applicant_id)
-        await applicant.send(f"❌ 招待申請が却下されました。（{self.invitee_name}）")
-        await interaction.response.edit_message(content=f"❌ 却下しました（{self.invitee_name}）", view=None)
+        await self.decide_request(interaction, False)
 
 class RenameModal(discord.ui.Modal, title="チャンネル名変更"):
     new_name = discord.ui.TextInput(

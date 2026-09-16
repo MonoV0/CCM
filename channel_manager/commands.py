@@ -34,6 +34,8 @@ from views import (
     ChannelSettingsView,
 )
 from events import cleanup_expired_hidden_channels
+from storage import load_invite_requests
+from invitations import status_text
 
 
 @bot.tree.command(name="reset", description="メンバーのロールと個人チャンネルをリセットします（管理者用）")
@@ -170,7 +172,7 @@ async def help_command(interaction: discord.Interaction):
         name="👤 メンバー用コマンド",
         value=(
             "`/rename` — 自分の個人チャンネル名を変更します\n"
-            "`/invite` — 知り合いを招待するための申請フォームを開きます\n"
+            "`/invite` — username・User ID・人物説明を入力して招待を申請します\n`/invite_status` — 招待申請の状態を確認します\n"
             "`/leave` — 個人チャンネルの扱いを選んでからサーバーを退出します\n"
             "`/find` — 名前の一部からメンバーの個人チャンネルを検索します\n"
             "`/mydata` — Botに登録されている自分のデータを確認します\n"
@@ -369,8 +371,27 @@ async def audit_data(interaction: discord.Interaction):
     await interaction.followup.send(result, ephemeral=True)
 
 @bot.tree.command(name="invite", description="招待申請フォームを開きます")
+@discord.app_commands.guild_only()
 async def invite(interaction: discord.Interaction):
     await interaction.response.send_modal(InviteModal())
+
+@bot.tree.command(name="invite_status", description="自分の招待申請の状態・承認済みリンクを確認します")
+@discord.app_commands.guild_only()
+async def invite_status(interaction: discord.Interaction, request_id: str | None = None):
+    records = load_invite_requests()
+    visible = {
+        key: record for key, record in records.items()
+        if record["guild_id"] == interaction.guild.id
+        and (record["applicant_id"] == interaction.user.id or interaction.user.id == ADMIN_ID)
+    }
+    if request_id:
+        record = visible.get(request_id)
+        message = status_text(request_id, record) if record else "申請が見つからないか、閲覧権限がありません。"
+    else:
+        latest = sorted(visible.items(), key=lambda item: item[1]["created_at"], reverse=True)[:3]
+        message = "\n\n".join(status_text(key, record) for key, record in latest) or "申請はありません。"
+    await interaction.response.send_message(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
 
 @bot.tree.command(name="rename", description="自分の個人チャンネル名を変更します")
 async def rename(interaction: discord.Interaction):

@@ -1,0 +1,7 @@
+.env
+__pycache__/
+.pytest_cache/
+# 招待記録は個人情報・期限付き招待コードを含むためコミットしない
+invite_requests.json
+invite_requests.lock
+.invite-*
