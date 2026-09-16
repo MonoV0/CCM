@@ -1,5 +1,5 @@
 [Unit]
-Description=Update CCM channel manager from origin/main
+Description=Update both independent CCM Discord Bots from origin/main
 
 [Service]
 Type=oneshot

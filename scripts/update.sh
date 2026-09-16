@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run through ccm-update.service: independent of the Bot's systemd cgroup.
+# Run through ccm-update.service, outside both independent Bot service cgroups.
 set -Eeuo pipefail
 umask 077
 export GIT_TERMINAL_PROMPT=0
@@ -19,13 +19,17 @@ flock -n 9 || { echo 'An update is already running.' >&2; exit 1; }
     echo 'Missing .venv/bin/python. Follow the Raspberry Pi setup instructions.' >&2; exit 1;
 }
 
+# Both units must be installed before stopping either Bot.
+bot_services=(ccm-bot.service ccm-stage-bot.service)
+systemctl --user cat "${bot_services[@]}" >/dev/null
+
 restart_needed=0
 recover() {
     result=$?
     trap - EXIT
     if [[ "$restart_needed" == 1 ]]; then
-        echo 'Update interrupted/failed; attempting to start the Bot with the current checkout.' >&2
-        systemctl --user start ccm-bot.service || true
+        echo 'Update interrupted/failed; attempting to start both Bots with the current checkout.' >&2
+        systemctl --user start "${bot_services[@]}" || true
     fi
     exit "$result"
 }
@@ -35,7 +39,7 @@ trap 'exit 143' TERM
 
 # Mark before stop so that a stop timeout also attempts recovery.
 restart_needed=1
-systemctl --user stop ccm-bot.service
+systemctl --user stop "${bot_services[@]}"
 # Git never resets local data or creates a merge commit.
 timeout 120 git pull --ff-only origin main
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse FETCH_HEAD)" ]] || {
@@ -43,8 +47,18 @@ timeout 120 git pull --ff-only origin main
 }
 timeout 300 "$repo_dir/.venv/bin/python" -m pip install --disable-pip-version-check -r requirements.txt
 "$repo_dir/.venv/bin/python" -m pip check
-systemctl --user start ccm-bot.service
+systemctl --user start "${bot_services[@]}"
 restart_needed=0
 sleep 5
-systemctl --user is-active --quiet ccm-bot.service
-printf 'Bot service started at commit %s. Check its startup DM and journal for Discord readiness.\n' "$(git rev-parse --short HEAD)"
+# is-active with multiple units succeeds if ANY unit is active; check each one.
+health=0
+for service in "${bot_services[@]}"; do
+    if ! systemctl --user is-active --quiet "$service"; then
+        printf 'Bot service is not active: %s\n' "$service" >&2
+        health=1
+    fi
+done
+if [[ "$health" != 0 ]]; then
+    exit 1
+fi
+printf 'Both Bot services started at commit %s. Check their startup DMs and journal for Discord readiness.\n' "$(git rev-parse --short HEAD)"

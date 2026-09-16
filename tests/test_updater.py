@@ -38,7 +38,7 @@ async def test_dispatch_uses_fixed_systemd_unit(modules, monkeypatch):
     assert spawn.call_args.args == ('systemctl', '--user', 'start', '--no-block', 'ccm-update.service')
 
 
-@pytest.mark.parametrize('scenario', ['success', 'pull_failure', 'dirty', 'wrong_branch', 'locked', 'pip_failure', 'inactive'])
+@pytest.mark.parametrize('scenario', ['success', 'pull_failure', 'dirty', 'wrong_branch', 'locked', 'pip_failure', 'channel_inactive', 'stage_inactive', 'missing_unit', 'stop_failure'])
 def test_shell_update_sequence_and_recovery(tmp_path, scenario):
     """実際のシェルを動かし、停止・pull・起動の順番と失敗時の再起動を確認する。"""
     root = Path(__file__).resolve().parents[1]
@@ -62,7 +62,12 @@ if name == 'git':
     else: print('abc123')
 elif name == 'flock' and scenario == 'locked': sys.exit(1)
 elif name == 'python' and scenario == 'pip_failure': sys.exit(1)
-elif name == 'systemctl' and 'is-active' in args and scenario == 'inactive': sys.exit(1)
+elif name == 'systemctl':
+    if 'cat' in args and scenario == 'missing_unit': sys.exit(1)
+    if 'stop' in args and scenario == 'stop_failure': sys.exit(1)
+    if 'is-active' in args:
+        if scenario == 'channel_inactive' and args[-1] == 'ccm-bot.service': sys.exit(1)
+        if scenario == 'stage_inactive' and args[-1] == 'ccm-stage-bot.service': sys.exit(1)
 elif name == 'timeout': os.execvp(args[1], args[1:])
 ''')
     shim.chmod(0o755)
@@ -73,12 +78,30 @@ elif name == 'timeout': os.execvp(args[1], args[1:])
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], CALLS=str(log), SCENARIO=scenario)
     result = subprocess.run(['bash', str(root / 'scripts/update.sh')], cwd=repo, env=env, capture_output=True, text=True)
     calls = log.read_text().splitlines()
-    stop = 'systemctl --user stop ccm-bot.service'
-    start = 'systemctl --user start ccm-bot.service'
+    stop = 'systemctl --user stop ccm-bot.service ccm-stage-bot.service'
+    start = 'systemctl --user start ccm-bot.service ccm-stage-bot.service'
     pull = 'git pull --ff-only origin main'
-    if scenario in ['dirty', 'wrong_branch', 'locked']:
+    if scenario in ['dirty', 'wrong_branch', 'locked', 'missing_unit']:
         assert stop not in calls and pull not in calls and start not in calls
+    elif scenario == 'stop_failure':
+        assert pull not in calls and calls.index(stop) < calls.index(start)
     else:
         assert calls.index(stop) < calls.index(pull) < calls.index(start)
         assert calls.count(start) == 1
     assert (result.returncode == 0) is (scenario == 'success'), result.stderr
+
+    if scenario in ['success', 'channel_inactive', 'stage_inactive']:
+        assert 'systemctl --user is-active --quiet ccm-bot.service' in calls
+        assert 'systemctl --user is-active --quiet ccm-stage-bot.service' in calls
+
+
+def test_units_keep_bots_in_independent_working_directories():
+    units = Path(__file__).resolve().parents[1] / 'deploy/systemd'
+    channel = (units / 'ccm-bot.service').read_text()
+    stage = (units / 'ccm-stage-bot.service').read_text()
+    update = (units / 'ccm-update.service').read_text()
+    assert 'WorkingDirectory=%h/CCM/channel_manager' in channel
+    assert 'WorkingDirectory=%h/CCM/stage_bot' in stage
+    assert 'ExecStart=%h/CCM/.venv/bin/python -u bot.py' in channel
+    assert 'ExecStart=%h/CCM/.venv/bin/python -u bot.py' in stage
+    assert 'Type=oneshot' in update and 'PartOf=' not in update

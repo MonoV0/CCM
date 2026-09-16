@@ -1,0 +1,15 @@
+[Unit]
+Description=CCM stage Discord Bot
+
+[Service]
+Type=simple
+WorkingDirectory=%h/CCM/stage_bot
+ExecStart=%h/CCM/.venv/bin/python -u bot.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
