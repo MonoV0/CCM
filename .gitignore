@@ -5,3 +5,4 @@ __pycache__/
 invite_requests.json
 invite_requests.lock
 .invite-*
+.venv/

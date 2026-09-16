@@ -1,0 +1,12 @@
+[Unit]
+Description=Update both independent CCM Discord Bots from origin/main
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/CCM
+# Install a stable copy outside the repository; git pull can change the source script.
+ExecStart=/bin/bash %h/.local/lib/ccm/update.sh
+TimeoutStartSec=600
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true

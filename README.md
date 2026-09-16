@@ -381,3 +381,106 @@ UIの操作対象と権限確認は `stage_context.py` に分離しています�
     停止記録の復旧は上記の手順に従ってください。
 
 自動テストは `python -m pytest -q tests`。本番へ接続せず、対象制限API・DM・永続化障害をモックします。
+
+## Raspberry Piでの更新（シェル／管理者専用 `/update`）
+
+`AGENTS.md` の構成に合わせ、**独立した2つのBotを別々のsystemdユーザーサービス**として動かします。
+
+| Bot | サービス | 作業ディレクトリ・設定 |
+| --- | --- | --- |
+| 個人チャンネル管理Bot | `ccm-bot.service` | `channel_manager/`、同ディレクトリの `.env` |
+| ステージBot | `ccm-stage-bot.service` | `stage_bot/`、同ディレクトリの `.env` |
+
+更新処理は別の `ccm-update.service` が担当し、**両方を停止 → mainを1回pull → 両方を起動**します。
+それぞれの `bot.py`、トークン、JSON保存先、モジュール構成は独立したままです。
+`/update` は `channel_manager/.env` の **`ADMIN_ID` 本人だけ**が実行できます。
+Discordの管理者ロールを持っていても、IDが一致しなければ実行できません。
+Discordの `/update` は個人チャンネル管理Botに登録し、**2つのBotをまとめて更新**します。
+
+### 初回設定
+
+Raspberry Pi OS（systemdあり）で、Botを動かす一般ユーザーとしてSSHログインしてください。
+以下は **既存のリポジトリが `~/CCM` にある場合**です。別の場所にある場合は、作業用のコピーを増やさず、
+下記の `cd` と3つの `.service` 内の `%h/CCM` を実際の配置先に変更してください。
+`%h` はそのユーザーのホームディレクトリです。
+
+最初の一度だけ、現在動いている両方のBotを、それぞれ元の起動方法で停止します
+（ターミナル起動なら `Ctrl+C`、既存サービスならそのサービスを停止し、自動起動も解除）。
+**同じBotを二重に起動しないでください。** 既存の `.env` とJSONデータは移動・削除しません。
+この機能を含むPRをmainにマージした後、次を実行します。
+
+```bash
+cd ~/CCM
+git switch main
+git pull --ff-only origin main
+
+# 初回のみ。既存.venvがある場合はその環境を使う
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+
+mkdir -p ~/.config/systemd/user ~/.local/lib/ccm
+cp deploy/systemd/ccm-bot.service deploy/systemd/ccm-stage-bot.service deploy/systemd/ccm-update.service ~/.config/systemd/user/
+install -m 700 scripts/update.sh ~/.local/lib/ccm/update.sh
+chmod 600 channel_manager/.env stage_bot/.env
+
+systemctl --user daemon-reload
+systemctl --user enable --now ccm-bot.service ccm-stage-bot.service
+# ログアウト後・Raspberry Pi再起動後もBotを動かすための初回設定
+sudo loginctl enable-linger "$USER"
+```
+
+`git`、`python3-venv`、`flock`（util-linux）、`timeout`（coreutils）が必要です。
+Python 3.10以上を使用してください。既存の個人チャンネル管理用 `CHANNEL_MANAGER_TOKEN` / `ADMIN_ID` と、ステージ用 `DISCORD_TOKEN` をそのまま使い、
+新しい環境変数は不要です。Botにsudo権限を与えたり、Discordから任意のコマンドを渡したりしません。
+
+前版の1Bot用systemd設定を導入済みの場合も、3つのサービス定義と更新スクリプトを再コピーし、
+`daemon-reload` を実行してください。その後、既存のステージBotを元の起動方法で停止してから
+`ccm-stage-bot.service` を有効化します。ステージ用サービス未登録なら、更新は両Botを停止する前に拒否します。
+
+### 普段の更新用シェルコマンド
+
+```bash
+systemctl --user start ccm-update.service
+```
+
+このコマンドは更新終了まで待ちます。更新サービスが以下を順番に実行します。
+
+1. mainブランチ・追跡ファイルに未保存の変更がないこと・仮想環境を確認し、排他ロックを取得。
+2. `ccm-bot.service` と `ccm-stage-bot.service` を停止し、両方の停止完了を待つ。
+3. `git pull --ff-only origin main`、依存パッケージのインストール・整合性確認。
+4. 両サービスを起動し、5秒後に**それぞれ**の稼働状態を確認。片方だけ稼働している場合も失敗とする。
+
+両Botサービスとは別の更新サービスが処理するので、Bot停止に巻き込まれません。
+更新スクリプトはリポジトリ外にコピーして実行するため、pullによる自身の書き換えの影響も受けません。
+今後スクリプトやサービス定義自体が変更された場合は、初回設定のコピーと `daemon-reload` を再実行してください。
+
+### Discordから更新
+
+サーバー内で `ADMIN_ID` 本人が `/update` を実行します。
+Botは本人だけに受付前の案内を返し、固定の `ccm-update.service` を起動します。
+60秒のクールダウンとsystemd・ファイルロックで重複更新を防ぎます。
+各Botの起動DMは再起動を示しますが、更新失敗後の再起動でも届きます。更新の成否は更新ログで確認してください。
+受付メッセージだけでは更新成功を意味しません。
+スラッシュコマンドは起動時に同期されるため、初回導入は上記シェル手順が必要です。
+
+### 状態・失敗時の確認
+
+```bash
+systemctl --user status ccm-bot.service ccm-stage-bot.service ccm-update.service
+journalctl --user -u ccm-update.service -n 100 --no-pager
+journalctl --user -u ccm-bot.service -u ccm-stage-bot.service -n 100 --no-pager
+```
+
+更新サービスはoneshotなので、正常終了後はinactiveでも正常です。終了コードとログを確認してください。
+BotがDiscordへ接続・コマンド同期できたかは、起動DMとBotログで確認します。
+
+ローカル変更や別ブランチの場合は停止前に拒否し、`git reset --hard` 等で変更を破棄しません。
+pullや依存更新に失敗した場合も現在のチェックアウトから両Botの起動を試み、更新処理は失敗として記録します。
+コードや依存環境の自動ロールバックは行わないので、起動に失敗した場合はログを確認して修復してください。
+`.env`、JSON、個人チャンネルの記録は削除しません。導入前に既存データをバックアップしてください。
+
+手動確認：非管理者で拒否されること、管理者で更新されること、連打して二重起動しないこと、
+ネットワーク切断時に失敗ログが残り再起動を試みること、更新後に `/invite`・既存チャンネルとステージの作成・操作が使えることを確認します。
+
+systemd参考：[サービス](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)、
+[ログアウト後の継続実行](https://www.freedesktop.org/software/systemd/man/252/loginctl.html)。
