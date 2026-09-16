@@ -1,0 +1,15 @@
+[Unit]
+Description=CCM channel manager Discord Bot
+
+[Service]
+Type=simple
+WorkingDirectory=%h/CCM/channel_manager
+ExecStart=%h/CCM/.venv/bin/python -u bot.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

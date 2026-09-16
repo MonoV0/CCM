@@ -36,6 +36,31 @@ from views import (
 from events import cleanup_expired_hidden_channels
 from storage import load_invite_requests
 from invitations import status_text
+from updater import request_update
+
+
+@bot.tree.command(name="update", description="mainからBotを更新・再起動します（管理者本人専用）")
+@discord.app_commands.guild_only()
+@discord.app_commands.checks.cooldown(1, 60, key=lambda interaction: interaction.user.id)
+async def update(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        await interaction.response.send_message("管理者のみ使用できます。", ephemeral=True)
+        return
+    # systemdは即時にBotを停止し得るため、Discordへの応答を先に完了する。
+    await interaction.response.send_message(
+        "更新を要求します。Botが一時停止し、mainからpullして再起動します。"
+        "起動DMは再起動の目安です。更新の成否はRaspberry Piの更新ログで確認してください。",
+        ephemeral=True,
+    )
+    try:
+        accepted = await request_update()
+    except OSError:
+        accepted = False
+    if not accepted:
+        await interaction.followup.send(
+            "更新サービスの起動を確認できませんでした。Raspberry Piのsystemd設定とログを確認してください。"
+            "受付結果が不明な場合があるため、自動再試行はしません。", ephemeral=True,
+        )
 
 
 @bot.tree.command(name="reset", description="メンバーのロールと個人チャンネルをリセットします（管理者用）")
@@ -192,6 +217,7 @@ async def help_command(interaction: discord.Interaction):
                 "`/sync_channels` — 既存メンバーの個人チャンネルを一括で紐付けます\n"
                 "`/link_channel` — メンバーと個人チャンネルを手動で紐付けます\n"
                 "`/check_channel` — 指定メンバーの紐付け状況を確認します\n"
+                "`/update` — mainからBotを更新・再起動します（ADMIN_ID本人のみ）\n"
                 "`/update_index` — 全カテゴリのチャンネル一覧indexを再生成します\n"
                 "`/cleanup_ghost_permissions` — 退出済みメンバーの権限が残っているチャンネルを検出・削除します\n"
                 "`/audit_data` — 記録データと実際の状態の不整合を検出します\n"
