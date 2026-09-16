@@ -33,7 +33,7 @@ CCM/
 └── channel_manager/
     ├── bot.py               # エントリーポイント（channel_manager/ディレクトリ内から実行）
     ├── bot_core.py          # トークン読み込み・Intents・ロギング・管理者への通知
-    ├── storage.py           # channel_data / hidden_channels / starred_channels のJSON永続化、学年カテゴリなどの定数
+    ├── storage.py           # channel_data / hidden_channels のJSON永続化、学年カテゴリなどの定数
     ├── utils.py              # 補助関数
     ├── views.py               # ボタン・モーダルなどUIコンポーネント（オンボーディング・設定パネル）
     ├── commands.py             # スラッシュコマンド定義
@@ -41,7 +41,6 @@ CCM/
     ├── .env.example            # 環境変数のサンプル
     ├── channel_data.json       # メンバー↔チャンネルの紐付け（実行時に自動生成）
     ├── hidden_channels.json    # 非表示化済みチャンネルの保持期限管理（実行時に自動生成）
-    ├── starred_channels.json   # お気に入りチャンネルの登録状況（実行時に自動生成）
     └── bot_errors.log          # エラーログ（実行時に自動生成）
 ```
 
@@ -87,9 +86,7 @@ CCM/
 3. 各カテゴリには一覧channel（`📌チャンネル一覧`）が自動生成・自動更新され、カテゴリが
   Discordの上限（49チャンネル）に近づくと `-2`, `-3`... の形で自動的に細分化される
 4. 一度離脱したメンバーが再参加した場合は、既存チャンネルの権限を自動復元して再利用する
-5. `/setup_selfpanel` で自分のチャンネルに設定パネルを設置すると、⭐ボタンでお気に入りチャンネル
-  （本人専用のブックマークカテゴリ）への登録/解除ができる
-6. 管理者向けに、既存メンバーの一括紐付け・手動紐付け・紐付け状況確認・全体リセットに加えて、
+5. 管理者向けに、既存メンバーの一括紐付け・手動紐付け・紐付け状況確認・全体リセットに加えて、
   データ監査（`/audit_data`）・ゴースト権限のクリーンアップ（`/cleanup_ghost_permissions`）・
   稼働状況確認（`/botstatus`）・直近エラーログ確認（`/recent_errors`）などの運用コマンドを備える
 
@@ -237,7 +234,6 @@ python bot.py
    - `/help` — コマンド一覧を表示
    - `/find` — 名前の一部から他メンバーの個人チャンネルを検索
    - `/rename` — 自分の個人チャンネル名を変更
-   - `/setup_selfpanel` — 自分のチャンネルに設定パネル（お気に入り登録ボタンなど）を設置
    - `/mydata` — 自分の登録状況を確認
    - `/export_my_channel` — 自分のチャンネルの投稿内容をファイルで受け取る
    - `/delete_my_data` — 在籍したまま自分のチャンネルと登録データを削除
@@ -448,3 +444,14 @@ pullや依存更新に失敗した場合も現在のチェックアウトから�
 
 systemd参考：[サービス](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)、
 [ログアウト後の継続実行](https://www.freedesktop.org/software/systemd/man/252/loginctl.html)。
+
+## お気に入り登録機能の廃止
+
+お気に入り登録・解除、専用カテゴリ／一覧の作成・更新、`/setup_selfpanel` を削除しました。
+新しい個人チャンネルにはお気に入りパネルを投稿しません。
+既存パネルの旧ボタンを押すと廃止の案内を返し、そのパネルのボタンを取り除きます。
+コマンド一覧からの削除はBot再起動時の同期で反映されます。
+
+旧 `starred_channels.json` は今後読み書きしません。既存のお気に入りカテゴリ・一覧チャンネルと
+旧データファイルは自動削除しないため、不要なら管理者が確認して削除してください。
+お気に入りに登録されていた元の個人チャンネルは削除対象ではありません。

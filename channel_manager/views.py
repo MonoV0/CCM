@@ -1,7 +1,7 @@
 """
 discord.ui のモーダル・ビュー定義まとめ。
 オンボーディング（ルール確認→参加区分→学年選択）、招待承認、
-チャンネル名変更、退出時の確認、リセット確認、設定パネルなど。
+チャンネル名変更、退出時の確認、リセット確認、旧パネルの廃止案内など。
 """
 from onboarding import finish_onboarding
 
@@ -15,8 +15,6 @@ from storage import (
     save_data,
     load_hidden_data,
     save_hidden_data,
-    load_starred_data,
-    save_starred_data,
 )
 from bot_core import bot, ADMIN_ID, logger
 from storage import load_invite_requests
@@ -26,13 +24,10 @@ from invitations import (
 )
 from utils import (
     create_personal_channel,
-    delete_favorites_category_if_empty,
     get_existing_channel,
-    get_or_create_favorites_category,
     hide_channel_from_others,
     make_embed,
     make_privacy_embed,
-    rebuild_favorites_index,
     restore_channel_permissions,
     update_channel_index,
 )
@@ -521,37 +516,15 @@ class DeleteMyDataConfirmView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="削除をキャンセルしました。", view=None)
 
-class ChannelSettingsView(discord.ui.View):
-    """全チャンネル共通のテンプレートView。
-    on_ready で一度だけ bot.add_view() すれば、Bot再起動後も全パネルのボタンが機能し続ける。
-    お気に入りは「押した本人のための個人ブックマーク」であり、チャンネルの所有者かどうかは無関係。
-    そのため toggle_star は所有者チェックを行わず、押した本人の starred_channels に記録する。"""
+class RetiredFavoritesView(discord.ui.View):
+    """既存メッセージの旧ボタンだけを受け付ける。登録・保存処理は行わない。"""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="⭐ このチャンネルをお気に入りに追加/解除", style=discord.ButtonStyle.secondary, custom_id="star_toggle")
-    async def toggle_star(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_starred_data()
-        user_id = str(interaction.user.id)
-        channel_id = str(interaction.channel.id)
-        entry = data.get(user_id, {"channels": [], "category_id": None, "index_channel_id": None})
-        starred = entry.get("channels", [])
-
-        if channel_id in starred:
-            starred.remove(channel_id)
-            entry["channels"] = starred
-            data[user_id] = entry
-            await delete_favorites_category_if_empty(interaction.guild, entry)
-            if entry.get("index_channel_id"):
-                await rebuild_favorites_index(interaction.guild, interaction.user, entry)
-            save_starred_data(data)
-            await interaction.response.send_message("⭐ お気に入りから解除しました。", ephemeral=True)
-        else:
-            starred.append(channel_id)
-            entry["channels"] = starred
-            entry = await get_or_create_favorites_category(interaction.guild, interaction.user, data)
-            entry["channels"] = starred
-            data[user_id] = entry
-            await rebuild_favorites_index(interaction.guild, interaction.user, entry)
-            save_starred_data(data)
-            await interaction.response.send_message("⭐ お気に入りに登録しました。", ephemeral=True)
+    @discord.ui.button(label="廃止された機能", custom_id="star_toggle")
+    async def retired(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("お気に入り登録機能は廃止されました。", ephemeral=True)
+        try:
+            await interaction.message.edit(content="お気に入り登録機能は廃止されました。", embed=None, view=None)
+        except discord.HTTPException:
+            logger.warning("旧お気に入りパネルを更新できませんでした。")

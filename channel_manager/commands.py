@@ -23,7 +23,6 @@ from utils import (
     update_channel_index,
     is_personal_channel_category,
     make_privacy_embed,
-    make_self_panel_embed,
 )
 from views import (
     ResetConfirmView,
@@ -31,7 +30,6 @@ from views import (
     RenameModal,
     LeaveConfirmView,
     DeleteMyDataConfirmView,
-    ChannelSettingsView,
 )
 from events import cleanup_expired_hidden_channels
 from storage import load_invite_requests
@@ -541,27 +539,6 @@ async def delete_my_data(interaction: discord.Interaction):
         view=DeleteMyDataConfirmView(channel=existing),
         ephemeral=True
     )
-
-@bot.tree.command(name="setup_selfpanel", description="自分の個人チャンネルに設定パネルを設置します")
-async def setup_selfpanel(interaction: discord.Interaction):
-    data = load_data()
-    channel_id_str = data.get(str(interaction.user.id))
-
-    if channel_id_str is None:
-        await interaction.response.send_message(
-            "あなたに紐付けられた個人チャンネルが見つかりませんでした。", ephemeral=True
-        )
-        return
-
-    channel = interaction.guild.get_channel(int(channel_id_str))
-    if channel is None:
-        await interaction.response.send_message(
-            "登録されているチャンネルが見つかりませんでした（削除済みの可能性があります）。", ephemeral=True
-        )
-        return
-
-    await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
-    await interaction.response.send_message(f"✅ {channel.mention} に設定パネルを設置しました。", ephemeral=True)
 
 @bot.tree.command(name="botstatus", description="Botの稼働状況を確認します（管理者用）")
 async def botstatus(interaction: discord.Interaction):

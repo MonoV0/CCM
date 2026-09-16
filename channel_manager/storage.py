@@ -1,5 +1,5 @@
 """
-永続化まわり: channel_data / hidden_channels / starred_channels のJSON読み書きと、
+永続化まわり: channel_data / hidden_channels のJSON読み書きと、
 グレード（学年）カテゴリなどの静的な設定値。
 """
 import json
@@ -10,7 +10,6 @@ from pathlib import Path
 
 DATA_FILE = Path("channel_data.json")
 HIDDEN_DATA_FILE = Path("hidden_channels.json")
-STARRED_DATA_FILE = Path("starred_channels.json")
 ERROR_LOG_FILE = Path("bot_errors.log")
 
 HIDDEN_RETENTION_DAYS = 30
@@ -77,17 +76,6 @@ def load_hidden_data() -> dict:
 
 def save_hidden_data(data: dict):
     with open(HIDDEN_DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-def load_starred_data() -> dict:
-    """{user_id(str): {"channels": [channel_id(str), ...], "category_id": str|None, "index_channel_id": str|None}} を保持する"""
-    if not STARRED_DATA_FILE.exists():
-        return {}
-    with open(STARRED_DATA_FILE, "r") as f:
-        return json.load(f)
-
-def save_starred_data(data: dict):
-    with open(STARRED_DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 GRADE_CATEGORIES = {

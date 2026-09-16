@@ -1,6 +1,6 @@
 """
 チャンネル操作まわりの共通処理: 個人チャンネルの検索・作成・権限復元、
-お気に入り機能、チャンネル一覧indexの更新、embed生成ヘルパーなど。
+チャンネル一覧indexの更新、embed生成ヘルパーなど。
 """
 from datetime import datetime, timezone
 
@@ -26,72 +26,6 @@ def get_channel_owner_id(channel_id: int) -> int | None:
         if cid_str == str(channel_id):
             return int(user_id_str)
     return None
-
-async def rebuild_favorites_index(guild: discord.Guild, member: discord.Member, entry: dict):
-    """本人専用のお気に入り一覧チャンネルの内容を、現在の登録状況に合わせて書き直す"""
-    index_channel = guild.get_channel(int(entry["index_channel_id"])) if entry.get("index_channel_id") else None
-    if index_channel is None:
-        return
-
-    lines = []
-    for cid in entry.get("channels", []):
-        channel = guild.get_channel(int(cid))
-        if channel:
-            lines.append(f"・{channel.mention}")
-        else:
-            lines.append(f"・（削除済みチャンネル: {cid}）")
-
-    content = "⭐ **あなたのお気に入りチャンネル一覧**\n\n" + ("\n".join(lines) if lines else "まだ登録がありません。")
-
-    async for msg in index_channel.history(limit=10):
-        if msg.author == guild.me:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-    await index_channel.send(content)
-
-async def get_or_create_favorites_category(guild: discord.Guild, member: discord.Member, data: dict) -> dict:
-    """本人にだけ見えるお気に入りカテゴリ＋一覧チャンネルを、無ければ作成して entry を返す"""
-    user_id = str(member.id)
-    entry = data.get(user_id, {"channels": [], "category_id": None, "index_channel_id": None})
-
-    category = guild.get_channel(int(entry["category_id"])) if entry.get("category_id") else None
-    if category is None:
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=False),
-        }
-        category = await guild.create_category(f"⭐ {member.display_name}のお気に入り", overwrites=overwrites)
-        entry["category_id"] = str(category.id)
-        entry["index_channel_id"] = None  # カテゴリを作り直した場合は一覧チャンネルも作り直す
-
-    index_channel = guild.get_channel(int(entry["index_channel_id"])) if entry.get("index_channel_id") else None
-    if index_channel is None:
-        index_channel = await guild.create_text_channel("一覧", category=category)
-        entry["index_channel_id"] = str(index_channel.id)
-
-    data[user_id] = entry
-    return entry
-
-async def delete_favorites_category_if_empty(guild: discord.Guild, entry: dict):
-    """お気に入りが0件になったら、放置されたカテゴリを残さないよう削除する"""
-    if entry.get("channels"):
-        return
-    index_channel = guild.get_channel(int(entry["index_channel_id"])) if entry.get("index_channel_id") else None
-    category = guild.get_channel(int(entry["category_id"])) if entry.get("category_id") else None
-    if index_channel:
-        try:
-            await index_channel.delete()
-        except Exception:
-            pass
-    if category:
-        try:
-            await category.delete()
-        except Exception:
-            pass
-    entry["category_id"] = None
-    entry["index_channel_id"] = None
 
 def make_privacy_embed() -> discord.Embed:
     """データの取り扱いについての説明embed。オンボーディング時と /privacy コマンドの両方で使う。"""
@@ -326,15 +260,6 @@ async def update_channel_index(guild, category):
         except Exception:
             pass
 
-def make_self_panel_embed() -> discord.Embed:
-    """チャンネル設定パネル用のembed。ウェルカムメッセージ内、および /setup_selfpanel で共通利用する。"""
-    embed = discord.Embed(
-        title="🛠️ チャンネル設定パネル",
-        description="このチャンネルをよく訪れる人は、下のボタンから自分だけのお気に入りに追加できます。",
-        color=0x5865F2
-    )
-    return embed
-
 async def create_personal_channel(guild, member, category_name):
     category = await get_or_create_available_category(guild, category_name)
 
@@ -380,15 +305,10 @@ async def create_personal_channel(guild, member, category_name):
         color=0x57F287
     )
     # 投稿・一覧更新は補助処理。登録済みチャンネルの返却を妨げない。
-    from views import ChannelSettingsView
     try:
         await channel.send(content=member.mention, embed=welcome_embed)
     except discord.HTTPException:
         logger.exception("個人チャンネル %s の歓迎文投稿に失敗しました。", channel.id)
-    try:
-        await channel.send(embed=make_self_panel_embed(), view=ChannelSettingsView())
-    except discord.HTTPException:
-        logger.exception("個人チャンネル %s の設定パネル投稿に失敗しました。", channel.id)
     try:
         await update_channel_index(guild, category)
     except discord.HTTPException:

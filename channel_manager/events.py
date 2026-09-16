@@ -19,7 +19,7 @@ from storage import (
     save_hidden_data,
 )
 from utils import get_existing_channel, hide_channel_from_others, make_embed, make_privacy_embed
-from views import RulesView, ChannelSettingsView, ApprovalView
+from views import RulesView, RetiredFavoritesView, ApprovalView
 from invitations import restore_approval_views
 
 
@@ -137,9 +137,8 @@ async def on_ready():
     if not cleanup_expired_hidden_channels.is_running():
         cleanup_expired_hidden_channels.start()
 
-    # チャンネル設定パネルの永続View登録。所有者情報を持たないテンプレートなので
-    # これを1回登録するだけで、既存の全チャンネルに設置済みのパネルもBot再起動後に機能し続ける。
-    bot.add_view(ChannelSettingsView())
+    # 廃止前のパネルは、押された際に廃止案内へ置き換える（登録処理はない）。
+    bot.add_view(RetiredFavoritesView())
 
     print(f"起動しました：{bot.user}")
 

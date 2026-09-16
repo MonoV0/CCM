@@ -303,7 +303,8 @@ async def test_creation_survives_optional_post_and_index_failures(modules, monke
     result = await utils.create_personal_channel(guild, member, '日報_A26')
     assert result is channel
     assert modules.storage.load_data() == {'7': '60'}
-    assert channel.send.await_count == 2
+    assert channel.send.await_count == 1
+    assert "view" not in channel.send.call_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -315,3 +316,22 @@ async def test_incomplete_creation_keeps_welcome(modules, monkeypatch):
     with pytest.raises(discord.HTTPException):
         await modules.views.GradeButton('A26', '日報_A26', 0).callback(inter)
     inter.channel.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+@pytest.mark.parametrize('edit_fails', [False, True])
+async def test_retired_favorites_cannot_register_or_modify_saved_data(modules, edit_fails):
+    legacy = Path('starred_channels.json')
+    legacy.write_text('{"7": {"channels": ["60"]}}')
+    original = legacy.read_bytes()
+    inter = interaction()
+    inter.message = NS(edit=AsyncMock(side_effect=http_error() if edit_fails else None))
+    view = modules.views.RetiredFavoritesView()
+    assert view.is_persistent()
+    await view.retired.callback(inter)
+    assert inter.response.send_message.call_args.kwargs['ephemeral']
+    assert '廃止' in inter.response.send_message.call_args.args[0]
+    assert inter.message.edit.call_args.kwargs['view'] is None
+    assert legacy.read_bytes() == original
+    assert modules.commands.bot.tree.get_command('setup_selfpanel') is None
