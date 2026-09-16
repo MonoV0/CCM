@@ -197,7 +197,7 @@ async def help_command(interaction: discord.Interaction):
         name="👤 メンバー用コマンド",
         value=(
             "`/rename` — 自分の個人チャンネル名を変更します\n"
-            "`/invite` — username・User ID・人物説明を入力して招待を申請します\n`/invite_status` — 招待申請の状態を確認します\n"
+            "`/invite` — 相手の名前・人物や関係性を入力して招待を申請します\n`/invite_status` — 招待申請の状態を確認します\n"
             "`/leave` — 個人チャンネルの扱いを選んでからサーバーを退出します\n"
             "`/find` — 名前の一部からメンバーの個人チャンネルを検索します\n"
             "`/mydata` — Botに登録されている自分のデータを確認します\n"

@@ -253,8 +253,7 @@ async def perform_reset(interaction: discord.Interaction, member: discord.Member
         pass
 
 class InviteModal(discord.ui.Modal, title="招待申請"):
-    name = discord.ui.TextInput(label="招待対象のDiscord username", placeholder="表示名ではなくusernameを入力", max_length=32, required=True)
-    user_id = discord.ui.TextInput(label="招待対象のUser ID", placeholder="開発者モードで相手を右クリック → ユーザーIDをコピー", min_length=17, max_length=20, required=True)
+    name = discord.ui.TextInput(label="招待したい人の名前", placeholder="例：山田太郎（表示名でも構いません）", max_length=100, required=True)
     reason = discord.ui.TextInput(
         label="どんな人物か・あなたとの関係", style=discord.TextStyle.paragraph,
         placeholder="例：同じ大学の友人で、○○の活動を一緒にしています", max_length=500, required=True,
@@ -266,26 +265,18 @@ class InviteModal(discord.ui.Modal, title="招待申請"):
         try:
             if interaction.guild is None:
                 raise InviteError("サーバー内で実行してください。")
-            username, relationship = self.name.value.strip().lstrip("@"), self.reason.value.strip()
-            raw_id = self.user_id.value.strip()
-            if not username or not relationship:
-                raise InviteError("usernameと人物・関係性の説明は必須です。")
-            if not raw_id.isascii() or not raw_id.isdecimal() or not 17 <= len(raw_id) <= 20 or not 0 < int(raw_id) < 2**64:
-                raise InviteError("対象者の正しいUser IDを入力してください。")
-            target = await bot.fetch_user(int(raw_id))
-            if target.bot or target.id == interaction.user.id:
-                raise InviteError("Botや自分自身は招待対象にできません。")
-            if target.name.casefold() != username.casefold():
-                raise InviteError("入力usernameとUser IDのアカウントが一致しません。相手のプロフィールで確認してください。")
-            request_id, record = new_request(interaction.guild.id, interaction.user.id, target, username, relationship)
+            name, relationship = self.name.value.strip(), self.reason.value.strip()
+            if not name or not relationship:
+                raise InviteError("相手の名前と人物・関係性の説明は必須です。")
+            request_id, record = new_request(interaction.guild.id, interaction.user.id, name, relationship)
             admin = await bot.fetch_user(ADMIN_ID)
             # 保存成功前は承認ボタンを公開しない。
             message = await admin.send(embed=request_embed(request_id, record), allowed_mentions=discord.AllowedMentions.none())
             record = transition(request_id, {"submitting"}, "pending", message_id=message.id)
             await message.edit(embed=request_embed(request_id, record), view=ApprovalView(request_id))
             await interaction.followup.send(
-                f"申請を送信しました。承認後は対象者本人へのDMを試みます。\n申請ID: `{request_id}`\n"
-                "DMできない場合のみ転送が必要です。`/invite_status` で状態と承認済みリンクを確認できます。", ephemeral=True,
+                f"申請を送信しました。承認後、相手に送る招待メッセージをあなたへDMします。\n申請ID: `{request_id}`\n"
+                "届いたメッセージを相手へ転送してください。`/invite_status` で状態と承認済みリンクを確認できます。", ephemeral=True,
             )
         except InviteError as error:
             await interaction.followup.send(str(error), ephemeral=True)
@@ -334,21 +325,21 @@ class ApprovalView(discord.ui.View):
                 detail = str(error) if isinstance(error, InviteError) else type(error).__name__
                 logger.error("招待発行 %s は停止: %s", self.request_id, detail)
                 await interaction.followup.send(
-                    f"申請 `{self.request_id}` の発行・制限確認に失敗しました。リンクは配布せず、再発行を禁止しました。記録とDiscordの招待一覧を確認してください。", ephemeral=True,
+                    f"申請 `{self.request_id}` の招待発行に失敗しました。リンクは配布せず、再発行を禁止しました。記録とDiscordの招待一覧を確認してください。", ephemeral=True,
                 )
                 return
             try:
-                direct, notified = await deliver_invite(self.request_id, record)
-                result = "✅ 承認済み：本人へDM送信済み" if direct else "✅ 承認済み：本人へDM不可。申請者による転送が必要です"
+                notified = await deliver_invite(self.request_id, record)
+                result = "✅ 承認済み：申請者へ転送用の招待メッセージをDMしました"
                 if not notified:
-                    result += "。申請者へのDMも失敗。/invite_status から同じリンクを取得できます"
+                    result = "✅ 承認・発行済み。申請者へのDMに失敗しました。/invite_status から同じリンクを取得できます"
             except Exception as error:
                 logger.error("招待配送 %s は停止: %s", self.request_id, type(error).__name__)
                 result = "✅ 承認・発行済み。配送を完了できませんでした。/invite_status で確認してください"
         else:
             result = "❌ 却下しました"
             try:
-                await send_dm(record["applicant_id"], f"❌ 招待申請 `{self.request_id}`（対象ID: {record['target_id']}）は却下されました。")
+                await send_dm(record["applicant_id"], f"❌ 招待申請 `{self.request_id}`（{discord.utils.escape_markdown(record.get('invitee_name', record.get('username', '不明')))}）は却下されました。")
             except Exception:
                 result += "（申請者への通知失敗）"
         # 元の説明と承認対象を残し、判断者・結果を追跡できるようにする。

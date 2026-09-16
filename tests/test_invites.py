@@ -1,4 +1,4 @@
-"""招待APIはすべてモックし、審査・永続化・対象制限・配送を検証する。"""
+"""招待APIはすべてモックし、審査・永続化・申請者への配送を検証する。"""
 import asyncio
 import importlib
 import json
@@ -17,7 +17,7 @@ TARGET = 123456789012345678
 
 def pending(m):
     service = importlib.import_module('invitations')
-    key, record = service.new_request(9, 7, NS(id=TARGET, name='friend'), 'friend', '大学の友人です')
+    key, record = service.new_request(9, 7, 'friend', '大学の友人です')
     service.transition(key, {'submitting'}, 'pending', message_id=55)
     return service, key
 
@@ -25,41 +25,43 @@ def pending(m):
 def api_setup(m, monkeypatch):
     service, key = pending(m)
     channel = NS(id=8, permissions_for=lambda me: NS(create_instant_invite=True))
-    guild = NS(me=NS(guild_permissions=NS(manage_guild=True)), text_channels=[channel])
+    guild = NS(me=NS(guild_permissions=NS(manage_guild=False)), text_channels=[channel])
     monkeypatch.setattr(service.bot, 'get_guild', lambda gid: guild)
-    api = NS(create=AsyncMock(return_value={'code': 'safe-code', 'max_uses': 1, 'max_age': 86400}), verify=AsyncMock(), delete=AsyncMock())
+    api = NS(create=AsyncMock(return_value={'code': 'safe-code', 'max_uses': 1, 'max_age': 86400}), delete=AsyncMock())
     class Context:
         async def __aenter__(self): return api
         async def __aexit__(self, *args): pass
-    monkeypatch.setattr(service, 'TargetedInviteAPI', Context)
+    monkeypatch.setattr(service, 'InviteAPI', Context)
     return service, key, api
 
 
-async def test_required_input_and_username_not_identity(modules, monkeypatch):
+async def test_required_name_and_relationship_without_user_id(modules, monkeypatch):
     service = importlib.import_module('invitations')
-    fetch = AsyncMock(return_value=NS(id=TARGET, name='different', bot=False))
-    monkeypatch.setattr(service.bot, 'fetch_user', fetch)
-    for name, reason, user_id in [('friend', ' ', str(TARGET)), ('friend', '大学の友人', 'not-an-id'), ('friend', '大学の友人', str(TARGET))]:
+    fetch = AsyncMock(); monkeypatch.setattr(service.bot, 'fetch_user', fetch)
+    for name, reason in [('friend', ' '), (' ', '大学の友人')]:
         modal = modules.views.InviteModal()
-        modal.name._value, modal.reason._value, modal.user_id._value = name, reason, user_id
+        modal.name._value, modal.reason._value = name, reason
         await modal.on_submit(interaction())
         assert not modules.storage.load_invite_requests()
-    assert modal.reason.required and modal.user_id.required
-    assert fetch.await_count == 1
+    assert modal.reason.required and modal.name.required
+    assert len(modal.children) == 2
+    fetch.assert_not_awaited()
 
 
 async def test_submission_persists_review_and_never_creates_invite(modules, monkeypatch):
     service = importlib.import_module('invitations')
     message = NS(id=55, edit=AsyncMock())
     admin = NS(send=AsyncMock(return_value=message))
-    fetch = AsyncMock(side_effect=[NS(id=TARGET, name='friend', bot=False), admin])
+    fetch = AsyncMock(return_value=admin)
     monkeypatch.setattr(service.bot, 'fetch_user', fetch)
     issue = AsyncMock(); monkeypatch.setattr(modules.views, 'issue_invite', issue)
     modal = modules.views.InviteModal()
-    modal.name._value, modal.reason._value, modal.user_id._value = 'friend', '同じ大学の友人', str(TARGET)
+    modal.name._value, modal.reason._value = 'friend', '同じ大学の友人'
     await modal.on_submit(interaction())
     record = next(iter(modules.storage.load_invite_requests().values()))
-    assert record['state'] == 'pending' and record['target_id'] == TARGET
+    assert record['state'] == 'pending' and record['invitee_name'] == 'friend'
+    assert 'target_id' not in record
+    fetch.assert_awaited_once_with(99)
     assert 'view' not in admin.send.call_args.kwargs
     assert isinstance(message.edit.call_args.kwargs['view'], modules.views.ApprovalView)
     issue.assert_not_awaited()
@@ -68,9 +70,9 @@ async def test_submission_persists_review_and_never_creates_invite(modules, monk
 async def test_admin_message_failure_cannot_bypass_review(modules, monkeypatch):
     service = importlib.import_module('invitations')
     admin = NS(send=AsyncMock(side_effect=http_error()))
-    monkeypatch.setattr(service.bot, 'fetch_user', AsyncMock(side_effect=[NS(id=TARGET, name='friend', bot=False), admin]))
+    monkeypatch.setattr(service.bot, 'fetch_user', AsyncMock(return_value=admin))
     modal = modules.views.InviteModal()
-    modal.name._value, modal.reason._value, modal.user_id._value = 'friend', '大学の友人', str(TARGET)
+    modal.name._value, modal.reason._value = 'friend', '大学の友人'
     await modal.on_submit(interaction())
     key, record = next(iter(modules.storage.load_invite_requests().items()))
     assert record['state'] == 'submitting'
@@ -99,17 +101,15 @@ async def test_concurrent_approvals_create_once(modules, monkeypatch):
         return await service.issue_invite(key, record)
     results = await asyncio.gather(approve(), approve(), approve())
     assert sum(r is not None for r in results) == 1
-    api.create.assert_awaited_once_with(8, TARGET, key)
-    api.verify.assert_awaited_once_with('safe-code', TARGET)
+    api.create.assert_awaited_once_with(8, key)
     record = modules.storage.load_invite_requests()[key]
     assert record['state'] == 'ready' and record['reviewer_id'] == 99
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'restriction', 'wrong_limits', 'permission', 'save'])
+@pytest.mark.parametrize('failure', ['timeout', 'wrong_limits', 'permission', 'save'])
 async def test_issue_failures_never_release_link_or_retry(modules, monkeypatch, failure):
     service, key, api = api_setup(modules, monkeypatch)
     if failure == 'timeout': api.create.side_effect = TimeoutError()
-    elif failure == 'restriction': api.verify.side_effect = service.InviteError('unverified')
     elif failure == 'wrong_limits': api.create.return_value['max_uses'] = 0
     elif failure == 'permission': monkeypatch.setattr(service.bot, 'get_guild', lambda gid: None)
     record = service.decide(key, 99, 55, True)
@@ -119,7 +119,7 @@ async def test_issue_failures_never_release_link_or_retry(modules, monkeypatch, 
     assert persisted['state'] in {'failed', 'issuing'}
     assert 'https://' not in service.status_text(key, persisted)
     with pytest.raises(service.InviteError): service.decide(key, 99, 55, True)
-    if failure in {'restriction', 'wrong_limits', 'save'}: api.delete.assert_awaited_once_with('safe-code')
+    if failure in {'wrong_limits', 'save'}: api.delete.assert_awaited_once_with('safe-code')
     assert api.create.await_count <= 1
 
 
@@ -139,19 +139,22 @@ async def test_restart_restores_pending_not_issuing(modules, monkeypatch):
     service.restore_approval_views(modules.views.ApprovalView)
     add.assert_not_called()
     with pytest.raises(service.InviteError): service.decide(key, 99, 55, True)
-    with pytest.raises(service.InviteError): service.new_request(9, 7, NS(id=TARGET, name='friend'), 'friend', '説明')
+    with pytest.raises(service.InviteError): service.new_request(9, 7, 'friend', '説明')
 
 
-@pytest.mark.parametrize('direct,applicant', [(True, True), (False, True), (False, False)])
-async def test_delivery_and_same_link_fallback(modules, monkeypatch, direct, applicant):
+@pytest.mark.parametrize('applicant', [True, False])
+async def test_delivery_only_to_applicant_without_private_review_details(modules, monkeypatch, applicant):
     service, key, api = api_setup(modules, monkeypatch)
     record = await service.issue_invite(key, service.decide(key, 99, 55, True))
-    send = AsyncMock(side_effect=[direct, applicant]); monkeypatch.setattr(service, 'send_dm', send)
-    assert await service.deliver_invite(key, record) == (direct, applicant)
-    assert send.call_args_list[0].args[0] == TARGET
-    assert 'https://discord.gg/safe-code' in send.call_args_list[0].args[1]
-    assert ('https://' in send.call_args_list[1].args[1]) is (not direct)
-    assert modules.storage.load_invite_requests()[key]['delivery'] == ('sent' if direct else 'fallback')
+    send = AsyncMock(return_value=applicant); monkeypatch.setattr(service, 'send_dm', send)
+    assert await service.deliver_invite(key, record) is applicant
+    send.assert_awaited_once()
+    recipient, message = send.call_args.args
+    assert recipient == 7
+    assert 'https://discord.gg/safe-code' in message and '1回限り' in message
+    assert record['invitee_name'] in message
+    assert record['relationship'] not in message and key not in message
+    assert modules.storage.load_invite_requests()[key]['delivery'] == ('applicant_sent' if applicant else 'applicant_failed')
     api.create.assert_awaited_once()
 
 
@@ -184,28 +187,33 @@ async def test_corrupt_storage_and_atomic_save_failure(modules, monkeypatch):
     with pytest.raises(json.JSONDecodeError): service.decide(key, 99, 55, True)
 
 
-@pytest.mark.parametrize('status,csv_text,valid', [(2, f'user_id\n{TARGET}\n', True), (2, 'user_id\n999\n', False), (2, f'user_id\n{TARGET}\n999\n', False), (3, '', False), (0, '', False), (1, '', False)])
-async def test_target_restriction_verified_exactly(modules, monkeypatch, status, csv_text, valid):
+async def test_rest_payload_is_single_use_and_expiring_without_roles(modules):
     service = importlib.import_module('invitations')
-    api = service.TargetedInviteAPI()
-    async def request(method, path): return csv_text if path.endswith('/target-users') else {'status': status}
-    api.request = AsyncMock(side_effect=request)
-    monkeypatch.setattr(service.asyncio, 'sleep', AsyncMock())
-    if valid: await api.verify('code', TARGET)
-    else:
-        with pytest.raises(service.InviteError): await api.verify('code', TARGET)
-    assert api.request.await_count <= 5
-
-
-async def test_rest_payload_is_targeted_without_role_grants(modules):
-    service = importlib.import_module('invitations')
-    api = service.TargetedInviteAPI(); api.request = AsyncMock()
-    await api.create(8, TARGET, 'request')
+    api = service.InviteAPI(); api.request = AsyncMock()
+    await api.create(8, 'request')
     call = api.request.call_args
     assert call.args == ('POST', '/channels/8/invites')
-    fields = {field[0]['name']: field[2] for field in call.kwargs['data']._fields}
-    assert fields['target_users_file'] == str(TARGET).encode()
-    assert json.loads(fields['payload_json']) == dict(max_uses=1, max_age=86400, unique=True, temporary=False)
+    assert call.kwargs['json'] == dict(max_uses=1, max_age=86400, unique=True, temporary=False)
+
+
+async def test_legacy_pending_requires_resubmission(modules):
+    service, key = pending(modules)
+    with modules.storage.edit_invite_requests() as records:
+        record = records[key]
+        record.pop('flow')
+        record['target_id'] = TARGET
+        record['username'] = record.pop('invitee_name')
+    with pytest.raises(service.InviteError, match='再申請'):
+        service.decide(key, 99, 55, True)
+    assert modules.storage.load_invite_requests()[key]['state'] == 'pending'
+    new_key, _ = service.new_request(9, 7, 'friend', '大学の友人')
+    assert new_key != key
+
+
+async def test_legacy_ready_link_retains_restriction_label(modules):
+    service = importlib.import_module('invitations')
+    record = dict(username='old', target_id=TARGET, state='ready', expires_at=time.time()+100, code='old')
+    assert '対象ID本人のみ' in service.status_text('legacy', record)
 
 
 async def test_nonadmin_button_cannot_call_issue(modules, monkeypatch):
@@ -219,12 +227,12 @@ async def test_nonadmin_button_cannot_call_issue(modules, monkeypatch):
 @pytest.mark.parametrize('status', [403, 429, 500])
 async def test_rest_errors_do_not_retry_post(modules, status):
     service = importlib.import_module('invitations')
-    api = service.TargetedInviteAPI()
+    api = service.InviteAPI()
     class Response:
         async def __aenter__(self): return NS(status=status)
         async def __aexit__(self, *args): pass
     api.session = NS(request=Mock(return_value=Response()))
-    with pytest.raises(service.InviteError): await api.create(8, TARGET, 'request')
+    with pytest.raises(service.InviteError): await api.create(8, 'request')
     api.session.request.assert_called_once()
     assert api.session.request.call_args.kwargs['allow_redirects'] is False
 
@@ -239,7 +247,7 @@ async def test_approval_keeps_audit_and_rejects_replay(modules, monkeypatch):
     edit = inter.message.edit.call_args.kwargs
     assert edit['view'] is None
     fields = edit['embed'].to_dict()['fields']
-    assert any(str(TARGET) in field['value'] for field in fields)
+    assert any('friend' in field['value'] for field in fields)
     assert any('大学の友人' in field['value'] for field in fields)
     assert any('99' in field['value'] for field in fields)
     await view.approve.callback(inter)
