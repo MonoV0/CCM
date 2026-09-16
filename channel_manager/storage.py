@@ -3,6 +3,9 @@
 グレード（学年）カテゴリなどの静的な設定値。
 """
 import json
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 DATA_FILE = Path("channel_data.json")
@@ -11,6 +14,49 @@ STARRED_DATA_FILE = Path("starred_channels.json")
 ERROR_LOG_FILE = Path("bot_errors.log")
 
 HIDDEN_RETENTION_DAYS = 30
+
+INVITE_DATA_FILE = Path("invite_requests.json")
+
+
+def load_invite_requests() -> dict:
+    """破損時は空データに戻さず、招待処理を停止する。"""
+    if not INVITE_DATA_FILE.exists():
+        return {}
+    with INVITE_DATA_FILE.open(encoding="utf-8") as stream:
+        data = json.load(stream)
+    if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        raise ValueError("Invalid invite request storage")
+    return data
+
+
+@contextmanager
+def edit_invite_requests():
+    """短い同期トランザクション。await禁止。別プロセスの承認も直列化する。"""
+    # 非POSIX環境でも既存のオンボーディング等のモジュール読み込みは維持する。
+    import fcntl
+
+    with INVITE_DATA_FILE.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            data = load_invite_requests()
+            yield data
+            fd, name = tempfile.mkstemp(prefix=".invite-", dir=INVITE_DATA_FILE.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(data, stream, ensure_ascii=False, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(name, INVITE_DATA_FILE)
+                directory = os.open(INVITE_DATA_FILE.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 def load_data() -> dict:
     if not DATA_FILE.exists():

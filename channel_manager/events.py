@@ -19,7 +19,8 @@ from storage import (
     save_hidden_data,
 )
 from utils import get_existing_channel, hide_channel_from_others, make_embed, make_privacy_embed
-from views import RulesView, ChannelSettingsView
+from views import RulesView, ChannelSettingsView, ApprovalView
+from invitations import restore_approval_views
 
 
 @bot.event
@@ -128,6 +129,10 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_ready():
+    try:
+        restore_approval_views(ApprovalView)
+    except Exception as error:
+        await notify_admin_error("招待審査の復元失敗（招待は停止、既存機能は継続）", error)
     await bot.tree.sync()
     if not cleanup_expired_hidden_channels.is_running():
         cleanup_expired_hidden_channels.start()
