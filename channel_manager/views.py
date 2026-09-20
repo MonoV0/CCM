@@ -6,9 +6,9 @@ discord.ui のモーダル・ビュー定義まとめ。
 from onboarding import finish_onboarding
 
 import discord
+from discord_settings import EXTERNAL_CATEGORY, GRADE_CATEGORIES, WELCOME_CATEGORY, get_role
 
 from storage import (
-    GRADE_CATEGORIES,
     HIDDEN_RETENTION_DAYS,
     RULES_TEXT,
     load_data,
@@ -30,6 +30,7 @@ from utils import (
     get_existing_channel,
     get_or_create_favorites_category,
     hide_channel_from_others,
+    is_personal_channel_category,
     make_embed,
     make_privacy_embed,
     rebuild_favorites_index,
@@ -60,7 +61,7 @@ class RoleSelectView(discord.ui.View):
     async def member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
-        role = discord.utils.get(interaction.guild.roles, name="member")
+        role = get_role(interaction.guild, "member")
         if role:
             await interaction.user.add_roles(role)
         if existing:
@@ -74,14 +75,14 @@ class RoleSelectView(discord.ui.View):
     async def ex_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
-        role = discord.utils.get(interaction.guild.roles, name="ex_member")
+        role = get_role(interaction.guild, "ex_member")
         if role:
             await interaction.user.add_roles(role)
         if existing:
             await restore_channel_permissions(existing, interaction.guild, interaction.user)
             personal_channel = existing
         else:
-            personal_channel = await create_personal_channel(interaction.guild, interaction.user, "日報_外部参加")
+            personal_channel = await create_personal_channel(interaction.guild, interaction.user, EXTERNAL_CATEGORY)
         await finish_onboarding(interaction, personal_channel, restored=existing is not None)
 
     @discord.ui.button(label="🔍 すでにチャンネルを持っている", style=discord.ButtonStyle.success, row=1)
@@ -94,9 +95,9 @@ class RoleSelectView(discord.ui.View):
             )
             return
         external = existing.category and (
-            existing.category.name == "日報_外部参加" or existing.category.name.startswith("日報_外部参加-")
+            is_personal_channel_category(existing.category.name, [EXTERNAL_CATEGORY])
         )
-        role = discord.utils.get(interaction.guild.roles, name="ex_member" if external else "member")
+        role = get_role(interaction.guild, "ex_member" if external else "member")
         if role:
             await interaction.user.add_roles(role)
         await restore_channel_permissions(existing, interaction.guild, interaction.user)
@@ -104,8 +105,8 @@ class RoleSelectView(discord.ui.View):
 
     @discord.ui.button(label="← 戻る", style=discord.ButtonStyle.danger, row=2)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member_role = discord.utils.get(interaction.guild.roles, name="member")
-        ex_member_role = discord.utils.get(interaction.guild.roles, name="ex_member")
+        member_role = get_role(interaction.guild, "member")
+        ex_member_role = get_role(interaction.guild, "ex_member")
         if member_role in interaction.user.roles:
             await interaction.user.remove_roles(member_role)
         if ex_member_role in interaction.user.roles:
@@ -122,13 +123,9 @@ class RoleSelectView(discord.ui.View):
 class GradeSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        grades_row0 = ["A21", "A22", "A23"]
-        grades_row1 = ["A24", "A25", "A26"]
-        for grade in grades_row0:
-            self.add_item(GradeButton(grade=grade, category_name=GRADE_CATEGORIES[grade], row=0))
-        for grade in grades_row1:
-            self.add_item(GradeButton(grade=grade, category_name=GRADE_CATEGORIES[grade], row=1))
-        self.add_item(BackToRoleButton())
+        for index, (grade, category_name) in enumerate(GRADE_CATEGORIES.items()):
+            self.add_item(GradeButton(grade=grade, category_name=category_name, row=index // 3))
+        self.add_item(BackToRoleButton(row=(len(GRADE_CATEGORIES) + 2) // 3))
 
 
 class GradeButton(discord.ui.Button):
@@ -148,11 +145,11 @@ class GradeButton(discord.ui.Button):
 
 
 class BackToRoleButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="← 戻る", style=discord.ButtonStyle.danger, row=2)
+    def __init__(self, row):
+        super().__init__(label="← 戻る", style=discord.ButtonStyle.danger, row=row)
 
     async def callback(self, interaction: discord.Interaction):
-        member_role = discord.utils.get(interaction.guild.roles, name="member")
+        member_role = get_role(interaction.guild, "member")
         if member_role in interaction.user.roles:
             await interaction.user.remove_roles(member_role)
 
@@ -194,8 +191,8 @@ class ResetConfirmView(discord.ui.View):
 async def perform_reset(interaction: discord.Interaction, member: discord.Member, existing):
     guild = interaction.guild
 
-    member_role = discord.utils.get(guild.roles, name="member")
-    ex_member_role = discord.utils.get(guild.roles, name="ex_member")
+    member_role = get_role(guild, "member")
+    ex_member_role = get_role(guild, "ex_member")
     if member_role in member.roles:
         await member.remove_roles(member_role)
     if ex_member_role in member.roles:
@@ -216,9 +213,9 @@ async def perform_reset(interaction: discord.Interaction, member: discord.Member
         del data[str(member.id)]
         save_data(data)
 
-    welcome_category = discord.utils.get(guild.categories, name="ようこそ")
+    welcome_category = discord.utils.get(guild.categories, name=WELCOME_CATEGORY)
     if not welcome_category:
-        welcome_category = await guild.create_category("ようこそ")
+        welcome_category = await guild.create_category(WELCOME_CATEGORY)
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -226,7 +223,7 @@ async def perform_reset(interaction: discord.Interaction, member: discord.Member
         guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
     }
     channel = await guild.create_text_channel(
-        f"ようこそ-{member.name}",
+        f"{WELCOME_CATEGORY}-{member.name}",
         category=welcome_category,
         overwrites=overwrites
     )
@@ -505,8 +502,8 @@ class DeleteMyDataConfirmView(discord.ui.View):
             except discord.HTTPException:
                 pass  # 一覧更新の失敗を、削除の失敗として扱わない
 
-        member_role = discord.utils.get(guild.roles, name="member")
-        ex_member_role = discord.utils.get(guild.roles, name="ex_member")
+        member_role = get_role(guild, "member")
+        ex_member_role = get_role(guild, "ex_member")
         if member_role in member.roles:
             await member.remove_roles(member_role)
         if ex_member_role in member.roles:

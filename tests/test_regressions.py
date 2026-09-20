@@ -17,7 +17,7 @@ async def modules(request, tmp_path, monkeypatch):
     source = Path(__file__).resolve().parents[1] / request.param
     root = tmp_path / request.param
     shutil.copytree(source, root, ignore=shutil.ignore_patterns('data', '__pycache__', '*.log', '.env'))
-    names = ['storage', 'bot_core', 'utils', 'operations', 'stage_context', 'onboarding', 'invitations', 'updater', 'views', 'events', 'commands']
+    names = ['discord_settings', 'storage', 'bot_core', 'utils', 'operations', 'stage_context', 'onboarding', 'invitations', 'updater', 'views', 'events', 'commands']
     previous = {n: sys.modules.pop(n) for n in names if n in sys.modules}
     monkeypatch.chdir(root)
     monkeypatch.syspath_prepend(str(root))
@@ -35,6 +35,28 @@ async def modules(request, tmp_path, monkeypatch):
 def require(m, kind):
     if m.kind != kind:
         pytest.skip('other bot')
+
+
+@pytest.mark.parametrize('modules', ['channel_manager'], indirect=True)
+def test_discord_settings_drive_roles_and_grade_buttons(modules, tmp_path, monkeypatch):
+    import json
+    settings = importlib.import_module('discord_settings')
+    custom = {
+        'roles': {'member': '参加者', 'ex_member': 'ゲスト'},
+        'categories': {'welcome': '案内', 'external': '外部', 'grades': {'新入生': '日報_新入生'}},
+    }
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps(custom, ensure_ascii=False), encoding='utf-8')
+    assert settings.load_discord_settings(path) == custom
+    monkeypatch.setattr(settings, 'ROLE_NAMES', custom['roles'])
+    assert settings.get_role(NS(roles=[NS(name='参加者')]), 'member').name == '参加者'
+    monkeypatch.setattr(modules.views, 'GRADE_CATEGORIES', custom['categories']['grades'])
+    buttons = modules.views.GradeSelectView().children
+    assert [button.label for button in buttons] == ['新入生', '← 戻る']
+    custom['categories']['external'] = '日報_新入生'
+    path.write_text(json.dumps(custom, ensure_ascii=False), encoding='utf-8')
+    with pytest.raises(ValueError, match='重複'):
+        settings.load_discord_settings(path)
 
 
 def interaction(channel=None):
