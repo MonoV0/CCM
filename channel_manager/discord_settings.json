@@ -1,0 +1,18 @@
+{
+  "roles": {
+    "member": "member",
+    "ex_member": "ex_member"
+  },
+  "categories": {
+    "welcome": "ようこそ",
+    "external": "日報_外部参加",
+    "grades": {
+      "A21": "日報_A21",
+      "A22": "日報_A22",
+      "A23": "日報_A23",
+      "A24": "日報_A24",
+      "A25": "日報_A25",
+      "A26": "日報_A26"
+    }
+  }
+}

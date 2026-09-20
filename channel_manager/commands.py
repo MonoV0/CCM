@@ -6,10 +6,10 @@ import time
 from datetime import datetime, timedelta
 
 import discord
+from discord_settings import ROLE_NAMES, personal_category_names
 
 from bot_core import bot, ADMIN_ID, START_TIME
 from storage import (
-    GRADE_CATEGORIES,
     INDEX_CHANNEL_NAME,
     HIDDEN_RETENTION_DAYS,
     ERROR_LOG_FILE,
@@ -272,7 +272,7 @@ async def update_index(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    base_names = list(GRADE_CATEGORIES.values()) + ["日報_外部参加"]
+    base_names = personal_category_names()
     updated = []
     for category in guild.categories:
         if is_personal_channel_category(category.name, base_names):
@@ -297,7 +297,7 @@ async def cleanup_ghost_permissions(interaction: discord.Interaction, dry_run: b
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    base_names = list(GRADE_CATEGORIES.values()) + ["日報_外部参加"]
+    base_names = personal_category_names()
     found = []
 
     for category in guild.categories:
@@ -350,7 +350,7 @@ async def audit_data(interaction: discord.Interaction):
     guild = interaction.guild
     data = load_data()
     hidden_data = load_hidden_data()
-    base_names = list(GRADE_CATEGORIES.values()) + ["日報_外部参加"]
+    base_names = personal_category_names()
 
     issues = []
 
@@ -472,7 +472,7 @@ async def mydata(interaction: discord.Interaction):
                     inline=False
                 )
             else:
-                embed.add_field(name="状態", value="✅ 通常公開中（あなた・member/ex_memberロールが閲覧可能）", inline=False)
+                embed.add_field(name="状態", value=f"✅ 通常公開中（あなた・{ROLE_NAMES['member']}/{ROLE_NAMES['ex_member']}ロールが閲覧可能）", inline=False)
         else:
             embed.add_field(name="個人チャンネル", value="記録はありますが、チャンネル自体は既に削除されています。", inline=False)
     else:

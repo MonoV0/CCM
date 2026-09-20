@@ -1,6 +1,6 @@
 """
 永続化まわり: channel_data / hidden_channels / starred_channels のJSON読み書きと、
-グレード（学年）カテゴリなどの静的な設定値。
+JSON保存と静的な保存設定。
 """
 import json
 import os
@@ -89,15 +89,6 @@ def load_starred_data() -> dict:
 def save_starred_data(data: dict):
     with open(STARRED_DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
-
-GRADE_CATEGORIES = {
-    "A21": "日報_A21",
-    "A22": "日報_A22",
-    "A23": "日報_A23",
-    "A24": "日報_A24",
-    "A25": "日報_A25",
-    "A26": "日報_A26",
-}
 
 INDEX_CHANNEL_NAME = "📌チャンネル一覧"
 # Discordの1カテゴリあたりのチャンネル上限は50。index分を1つ確保して49を上限とする。

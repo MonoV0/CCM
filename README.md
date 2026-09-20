@@ -33,7 +33,9 @@ CCM/
 └── channel_manager/
     ├── bot.py               # エントリーポイント（channel_manager/ディレクトリ内から実行）
     ├── bot_core.py          # トークン読み込み・Intents・ロギング・管理者への通知
-    ├── storage.py           # channel_data / hidden_channels / starred_channels のJSON永続化、学年カテゴリなどの定数
+    ├── storage.py           # channel_data / hidden_channels / starred_channels のJSON永続化
+    ├── discord_settings.json # ロール・カテゴリ名の運用設定
+    ├── discord_settings.py  # JSON設定の検証・読み込み
     ├── utils.py              # 補助関数
     ├── views.py               # ボタン・モーダルなどUIコンポーネント（オンボーディング・設定パネル）
     ├── commands.py             # スラッシュコマンド定義
@@ -257,9 +259,20 @@ python bot.py
 
 ### 個人チャンネル管理bot
 
-- `channel_manager/storage.py` 内の `GRADE_CATEGORIES` を編集すると、学年・区分ごとのカテゴリ名を
-  変更・追加できます。
-- 同ファイルの `HIDDEN_RETENTION_DAYS` で、`/leave` の「非表示にする」選択後や自主退出・キック時に
+- ロール・カテゴリ名は [`channel_manager/discord_settings.json`](channel_manager/discord_settings.json) を
+  テキストエディタまたは GitHub のファイル編集画面で変更できます。Python コードの編集は不要です。
+  `roles.member` と `roles.ex_member` は Discord に実在するロール名を正確に指定してください。
+  `categories.welcome` は入室案内、`categories.external` は外部参加者の個人チャンネル、
+  `categories.grades` は「学年ボタンの表示名: 作成先カテゴリ名」です。
+  学年は JSON に書いた順にボタンへ表示され、1～12件まで追加・削除できます。
+  カテゴリが無い場合は Bot が作成します。`-2` 以降の細分化カテゴリも自動作成されます。
+- 編集後は JSON の構文を確認し、個人チャンネル管理 bot を再起動してください。
+  例: `python3 -m json.tool channel_manager/discord_settings.json`。
+  設定に不足や重複がある場合は起動時にエラーになります。
+  既存のカテゴリ・ロールは自動改名されません。名前を変更する場合は Discord 側も同じ名前にし、
+  既存の個人チャンネルが旧カテゴリに残らないよう移動してください。
+  設定変更前後のロール名が異なる場合、既存メンバーのロール付け替えも Discord 側で行ってください。
+- `channel_manager/storage.py` の `HIDDEN_RETENTION_DAYS` で、`/leave` の「非表示にする」選択後や自主退出・キック時に
   チャンネルを自動削除するまでの保持日数を調整できます（デフォルト30日）。
 - 同ファイルの `MAX_CHANNELS_PER_CATEGORY` でカテゴリ自動細分化の閾値を調整できます
   （Discordの1カテゴリあたりの上限は50のため、デフォルトは49）。

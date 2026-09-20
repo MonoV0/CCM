@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 
 import discord
+from discord_settings import WELCOME_CATEGORY
 from discord.ext import tasks
 
 from bot_core import bot, ADMIN_ID, logger, notify_admin_error
@@ -27,13 +28,13 @@ from invitations import restore_approval_views
 async def on_member_join(member):
     guild = member.guild
 
-    welcome_category = discord.utils.get(guild.categories, name="ようこそ")
+    welcome_category = discord.utils.get(guild.categories, name=WELCOME_CATEGORY)
     if not welcome_category:
         category_overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         }
-        welcome_category = await guild.create_category("ようこそ", overwrites=category_overwrites)
+        welcome_category = await guild.create_category(WELCOME_CATEGORY, overwrites=category_overwrites)
 
     # チャンネルごとに個別で権限を明示設定
     overwrites = {
@@ -42,7 +43,7 @@ async def on_member_join(member):
         guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
     }
     channel = await guild.create_text_channel(
-        f"ようこそ-{member.name}",
+        f"{WELCOME_CATEGORY}-{member.name}",
         category=welcome_category,
         overwrites=overwrites
     )
@@ -105,8 +106,8 @@ async def on_member_remove(member):
     guild = member.guild
 
     # ようこそチャンネルが残っていたら削除
-    channel_name = f"ようこそ-{member.name}"
-    welcome_category = discord.utils.get(guild.categories, name="ようこそ")
+    channel_name = f"{WELCOME_CATEGORY}-{member.name}"
+    welcome_category = discord.utils.get(guild.categories, name=WELCOME_CATEGORY)
     if welcome_category:
         for channel in welcome_category.channels:
             if channel.name == channel_name:

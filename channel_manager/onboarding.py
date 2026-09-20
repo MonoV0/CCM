@@ -2,6 +2,7 @@
 import asyncio
 
 import discord
+from discord_settings import WELCOME_CATEGORY
 
 from bot_core import logger, notify_admin_error
 from utils import make_embed
@@ -14,7 +15,7 @@ async def finish_onboarding(interaction, personal_channel, *, restored=False):
         isinstance(welcome, discord.TextChannel)
         and welcome.id != personal_channel.id
         and welcome.category is not None
-        and welcome.category.name == "ようこそ"
+        and welcome.category.name == WELCOME_CATEGORY
         and welcome.overwrites_for(interaction.user).view_channel is True
     )
     note = "\n\nこの案内用チャンネルは3秒後に自動削除されます。" if safe_to_delete else ""

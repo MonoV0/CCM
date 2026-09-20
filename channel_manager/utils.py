@@ -5,13 +5,13 @@
 from datetime import datetime, timezone
 
 import discord
+from discord_settings import ROLE_NAMES, get_role, personal_category_names
 
 from storage import (
     load_data,
     save_data,
     load_hidden_data,
     save_hidden_data,
-    GRADE_CATEGORIES,
     INDEX_CHANNEL_NAME,
     MAX_CHANNELS_PER_CATEGORY,
     HIDDEN_RETENTION_DAYS,
@@ -116,7 +116,7 @@ def make_privacy_embed() -> discord.Embed:
     )
     embed.add_field(
         name="👀 アクセスできる人",
-        value="・通常時：本人／member・ex_memberロールを持つメンバー\n・非表示化後：管理者のみ",
+        value=f"・通常時：本人／{ROLE_NAMES['member']}・{ROLE_NAMES['ex_member']}ロールを持つメンバー\n・非表示化後：管理者のみ",
         inline=False
     )
     embed.add_field(
@@ -169,7 +169,7 @@ async def get_existing_channel(guild, member):
             save_data(data)
 
     # フォールバック検索（細分化カテゴリ「-2」「-3」なども対象）
-    all_category_names = list(GRADE_CATEGORIES.values()) + ["日報_外部参加"]
+    all_category_names = personal_category_names()
     channel_name = member.name.lower().replace(" ", "-")
 
     target_categories = [
@@ -203,8 +203,8 @@ async def get_existing_channel(guild, member):
 async def restore_channel_permissions(channel, guild, member):
     """非表示状態（/leaveで非表示にした後）から復帰したユーザーの個人チャンネルに、
     通常時の閲覧権限（@everyone非表示・member/ex_memberロール閲覧可・本人フル権限）を再設定する"""
-    member_role = discord.utils.get(guild.roles, name="member")
-    ex_member_role = discord.utils.get(guild.roles, name="ex_member")
+    member_role = get_role(guild, "member")
+    ex_member_role = get_role(guild, "ex_member")
 
     await channel.set_permissions(guild.default_role, read_messages=False, send_messages=False)
     if member_role:
@@ -252,8 +252,8 @@ async def get_or_create_available_category(guild, base_name):
 
 async def update_channel_index(guild, category):
     """カテゴリ内の個人チャンネル一覧をindexチャンネルに書き出す（ピン留め・先頭固定）"""
-    member_role = discord.utils.get(guild.roles, name="member")
-    ex_member_role = discord.utils.get(guild.roles, name="ex_member")
+    member_role = get_role(guild, "member")
+    ex_member_role = get_role(guild, "ex_member")
 
     index_channel = discord.utils.get(category.channels, name=INDEX_CHANNEL_NAME)
     if not index_channel:
@@ -338,8 +338,8 @@ def make_self_panel_embed() -> discord.Embed:
 async def create_personal_channel(guild, member, category_name):
     category = await get_or_create_available_category(guild, category_name)
 
-    member_role = discord.utils.get(guild.roles, name="member")
-    ex_member_role = discord.utils.get(guild.roles, name="ex_member")
+    member_role = get_role(guild, "member")
+    ex_member_role = get_role(guild, "ex_member")
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
