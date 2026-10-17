@@ -135,8 +135,8 @@ def make_privacy_embed() -> discord.Embed:
         inline=False
     )
     embed.add_field(
-        name="📰 TLとAI要約",
-        value="管理者がTLを有効にした場合、設定カテゴリの投稿本文をOpenAI APIへ送信し、AI要約とおすすめ投稿リンクをTLに掲載します。本人専用・非表示チャンネルは対象外です。TLの投稿はDiscord上に残るため、削除が必要な場合は管理者に連絡してください。",
+        name="🎲 TLと日報ガチャ",
+        value="管理者がTLを有効にした場合、設定カテゴリからランダムに選ばれた日報の抜粋とリンクをTLに掲載します。TL読者が閲覧できないチャンネルや非表示チャンネルは対象外です。/diary_gacha の結果は実行者だけに表示されます。TLの投稿はDiscord上に残るため、削除が必要な場合は管理者に連絡してください。",
         inline=False,
     )
     embed.set_footer(text="ご不明点があれば管理者までお気軽にご連絡ください。")

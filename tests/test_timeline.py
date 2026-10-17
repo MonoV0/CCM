@@ -1,4 +1,4 @@
-"""Discord/OpenAIへ接続せず、転載権限・配信状態・検索条件を検証。"""
+"""Discordへ接続せず、転載権限・配信状態・検索条件を検証。"""
 import importlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
@@ -73,7 +73,6 @@ def publishing(t, monkeypatch, tmp_path):
     t.save_state({'1': {'enabled': True, 'channel_id': 20,
                        'last_post': (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()}})
     monkeypatch.setattr(t, 'collect', AsyncMock(return_value=([post()], 0)))
-    monkeypatch.setattr(t, 'ai_summary', AsyncMock(return_value='開発の進捗が共有されました。[1]'))
     monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [NS(id=10)])
     return guild, destination
 
@@ -91,23 +90,23 @@ async def test_publish_updates_only_after_success_and_survives_restart(modules, 
     assert not await t.publish(guild)
     embed = dest.send.call_args.kwargs['embed']
     assert len(embed) <= 6000
-    assert '[元の投稿]' in embed.fields[1].value
-    assert '要約の参照元' in embed.fields[-1].name
+    assert '[日報を読む]' in embed.fields[0].value
+    assert embed.title == '🎲 日報ガチャ'
     assert dest.send.call_args.kwargs['allowed_mentions'].everyone is False
 
 
-async def test_summary_failure_keeps_delivery_due(modules, monkeypatch, tmp_path):
+async def test_collection_failure_keeps_delivery_due(modules, monkeypatch, tmp_path):
     t = importlib.import_module('timeline')
     guild, dest = publishing(t, monkeypatch, tmp_path)
     before = t.load_state()
-    t.ai_summary.side_effect = RuntimeError('HTTP 429')
+    t.collect.side_effect = RuntimeError('Discord unavailable')
     with pytest.raises(RuntimeError):
         await t.publish(guild)
     assert t.load_state() == before
     dest.send.assert_not_awaited()
 
 
-async def test_permissions_change_while_ai_runs_stops_delivery(modules, monkeypatch, tmp_path):
+async def test_permissions_change_during_collection_stops_delivery(modules, monkeypatch, tmp_path):
     t = importlib.import_module('timeline')
     guild, dest = publishing(t, monkeypatch, tmp_path)
     monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [])
@@ -123,28 +122,23 @@ async def test_already_sent_marker_prevents_duplicate_after_state_write_failure(
     previous = NS(author=NS(id=99), embeds=[NS(footer=NS(text=f'ccm-tl:1:{bucket}'))])
     dest.history = lambda **kw: items([previous])
     assert not await t.publish(guild)
-    t.ai_summary.assert_not_awaited()
+    t.collect.assert_not_awaited()
     dest.send.assert_not_awaited()
 
 
-async def test_openai_payload_and_incomplete_response(modules, monkeypatch):
+async def test_gacha_includes_zero_reaction_posts_and_draws_without_duplicates(modules, monkeypatch):
     t = importlib.import_module('timeline')
-    monkeypatch.setenv('OPENAI_API_KEY', 'dummy')
-    monkeypatch.setenv('OPENAI_SUMMARY_MODEL', 'configured-model')
-    response = NS(status=200, json=AsyncMock(return_value={
-        'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '要約'}]}]}))
-    request = AsyncMock(); request.__aenter__.return_value = response
-    session = NS(post=Mock(return_value=request))
-    client = AsyncMock(); client.__aenter__.return_value = session
-    monkeypatch.setattr(t.aiohttp, 'ClientSession', Mock(return_value=client))
-    assert await t.ai_summary([post()]) == '要約'
-    payload = session.post.call_args.kwargs['json']
-    assert payload['store'] is False
-    assert payload['model'] == 'configured-model'
-    assert 'tools' not in payload
-    response.json.return_value = {'status': 'incomplete', 'output': []}
-    with pytest.raises(RuntimeError, match='完了'):
-        await t.ai_summary([post()])
+    messages = [post(i, count=0) for i in range(5)]
+    assert t.draw_diaries([], 1) == []
+    drawn = t.draw_diaries(messages, 10)
+    assert len({m.id for m in drawn}) == 5
+    assert {m.id for m in drawn} == {m.id for m in messages}
+    # 乱数抽選へ元の候補を全て渡し、リアクション等で重み付けしない。
+    sampler = Mock(return_value=[messages[-1]])
+    monkeypatch.setattr(t.random, 'sample', sampler)
+    assert t.draw_diaries(messages, 1) == [messages[-1]]
+    sampler.assert_called_once_with(messages, k=1)
+    assert not hasattr(t, 'ai_summary')
 
 
 async def test_setup_requires_roles_before_creating_anything(modules):
@@ -171,14 +165,48 @@ async def test_commands_register_admin_checks_and_private_search(modules, monkey
 async def test_largest_configured_digest_fits_discord_embed_limits(modules, monkeypatch, tmp_path):
     t = importlib.import_module('timeline')
     guild, dest = publishing(t, monkeypatch, tmp_path)
-    config = t.load_settings(); config.update(pickup_count=10, summary_messages=200)
+    config = t.load_settings(); config.update(pickup_count=10)
     monkeypatch.setattr(t, 'load_settings', lambda: config)
     messages = [post(i, content='長い投稿' * 400) for i in range(200)]
     for message in messages:
         message.jump_url = 'https://discord.com/channels/' + '/'.join(['9' * 20] * 3)
     t.collect.return_value = (messages, 0)
-    t.ai_summary.return_value = 'あ' * 1500 + ' '.join(f'[{i}]' for i in range(1, 11))
     assert await t.publish(guild)
     embed = dest.send.call_args.kwargs['embed']
     assert len(embed) <= 6000
     assert all(len(f.value) <= 1024 for f in embed.fields)
+
+
+async def test_manual_gacha_is_private_and_uses_user_read_permissions(modules, monkeypatch):
+    t = importlib.import_module('timeline')
+    commands = importlib.import_module('timeline_commands')
+    monkeypatch.setattr(t, 'collect', AsyncMock(return_value=([post()], 0)))
+    monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [NS(id=10)])
+    inter = NS(guild=NS(id=1), user=NS(id=7), response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    await commands.diary_gacha.callback(inter, days=7)
+    assert inter.followup.send.call_args.kwargs['ephemeral'] is True
+    assert t.collect.call_args.kwargs['user'] is inter.user
+    assert t.collect.call_args.kwargs['days'] == 7
+    assert '[日報を読む]' in inter.followup.send.call_args.kwargs['embed'].fields[0].value
+
+
+async def test_manual_gacha_handles_empty_and_newly_private_sources(modules, monkeypatch):
+    t = importlib.import_module('timeline')
+    commands = importlib.import_module('timeline_commands')
+    monkeypatch.setattr(t, 'collect', AsyncMock(return_value=([post()], 0)))
+    monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [])
+    inter = NS(guild=NS(id=1), user=NS(id=7), response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    await commands.diary_gacha.callback(inter)
+    assert '対象の日報がありません' in inter.followup.send.call_args.args[0]
+    assert inter.followup.send.call_args.kwargs['ephemeral'] is True
+
+
+async def test_old_settings_with_unused_ai_keys_still_load(modules, monkeypatch, tmp_path):
+    import json
+    t = importlib.import_module('timeline')
+    config = t.load_settings()
+    config.update(summary_messages=100, recommendation_emojis=[], minimum_reactions=1)
+    path = tmp_path / 'old-settings.json'
+    path.write_text(json.dumps(config), encoding='utf-8')
+    monkeypatch.setattr(t, 'SETTINGS_FILE', path)
+    assert t.load_settings()['pickup_count'] == 1
