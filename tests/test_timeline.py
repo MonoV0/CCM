@@ -383,7 +383,8 @@ async def test_category_boundary_prefers_saved_tl_even_after_rename_and_fails_cl
     guild.categories = [lower, anchor, upper]
     assert t.category_boundary(guild, t.load_settings()) == {1}
     t.save_state({})
-    assert t.category_boundary(guild, t.load_settings()) == set()
+    with pytest.raises(t.TimelineBoundaryError, match='/tl_boundary'):
+        t.category_boundary(guild, t.load_settings())
 
 
 async def test_notifications_once_for_all_categories_and_default_off(modules, monkeypatch, tmp_path):
@@ -456,3 +457,69 @@ async def test_empty_update_never_sends_everyone_notification(modules, monkeypat
     t.collect.return_value = ([], 0)
     assert not await t.publish(guild, force=True)
     dest.send.assert_not_awaited()
+
+
+async def test_lower_duplicate_name_category_is_not_excluded(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    anchor, duplicate = NS(id=1, name='タイムライン'), NS(id=2, name='タイムライン')
+    guild = NS(id=1, me=NS(), categories=[anchor, duplicate])
+    source = NS(id=30, name='diary', category=duplicate,
+                permissions_for=lambda _: NS(view_channel=True, read_message_history=True))
+    guild.text_channels = [source]
+    t.save_state({'1': {'channel_id': 20}})
+    guild.get_channel = lambda _: NS(category=anchor)
+    monkeypatch.setattr(t, 'load_hidden_data', lambda: {})
+    assert [c.id for c in t.source_channels(guild, t.load_settings(), user=NS())] == [30]
+
+
+async def test_ambiguous_or_missing_boundary_returns_actionable_error(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    guild = NS(id=1, categories=[NS(id=1, name='タイムライン'), NS(id=2, name='タイムライン')])
+    with pytest.raises(ValueError, match='/tl_boundary'):
+        t.category_boundary(guild, t.load_settings())
+    guild.categories = []
+    with pytest.raises(ValueError, match='/tl_boundary'):
+        t.category_boundary(guild, t.load_settings())
+
+
+async def test_explicit_boundary_stays_pinned_when_tl_channel_moves(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    upper, anchor, lower = NS(id=1, name='管理'), NS(id=2, name='TL'), NS(id=3, name='日報')
+    guild = NS(id=1, categories=[upper, anchor, lower], get_channel=lambda _: NS(category=upper))
+    t.save_state({'1': {'channel_id': 20, 'boundary_category_id': 2}})
+    assert t.category_boundary(guild, t.load_settings(), destination=NS(category=upper)) == {3}
+    guild.categories.remove(anchor)
+    with pytest.raises(t.TimelineBoundaryError, match='指定し直し'):
+        t.category_boundary(guild, t.load_settings())
+
+
+async def test_boundary_command_sets_id_and_reports_targets_without_touching_channels(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline'); c = importlib.import_module('timeline_commands')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    anchor, lower = NS(id=2, name='TL'), NS(id=3, name='日報')
+    guild = NS(id=1, categories=[anchor, lower])
+    inter = NS(guild=guild, response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [NS(id=10)])
+    await c.tl_boundary.callback(inter, category=anchor)
+    assert t.load_state()['1']['boundary_category_id'] == 2
+    assert '取得可能: 1チャンネル' in inter.followup.send.call_args.args[0]
+    assert inter.followup.send.call_args.kwargs['ephemeral'] is True
+    assert c.tl_boundary.checks
+    await c.tl_boundary.callback(inter)
+    assert 'ID: 2' in inter.followup.send.call_args.args[0]
+
+
+async def test_missing_boundary_returns_help_instead_of_empty_gacha_or_generic_error(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    guild = NS(id=1, categories=[], text_channels=[])
+    with pytest.raises(t.TimelineBoundaryError) as caught:
+        await t.collect(guild, t.load_settings(), user=NS())
+    monkeypatch.setattr(modules.events, 'notify_admin_error', AsyncMock())
+    inter = NS(response=NS(is_done=lambda: True), followup=NS(send=AsyncMock()))
+    await modules.events.on_app_command_error(inter, NS(original=caught.value))
+    assert '/tl_boundary' in inter.followup.send.call_args.args[0]
+    modules.events.notify_admin_error.assert_not_awaited()
