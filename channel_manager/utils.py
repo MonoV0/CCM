@@ -134,6 +134,11 @@ def make_privacy_embed() -> discord.Embed:
         value="・`/reset` が管理者によって実行された場合、事前と事後にDMで通知が届きます。",
         inline=False
     )
+    embed.add_field(
+        name="📰 TLとAI要約",
+        value="管理者がTLを有効にした場合、設定カテゴリの投稿本文をOpenAI APIへ送信し、AI要約とおすすめ投稿リンクをTLに掲載します。本人専用・非表示チャンネルは対象外です。TLの投稿はDiscord上に残るため、削除が必要な場合は管理者に連絡してください。",
+        inline=False,
+    )
     embed.set_footer(text="ご不明点があれば管理者までお気軽にご連絡ください。")
     return embed
 
