@@ -17,5 +17,7 @@
   "interval_hours": 24,
   "lookback_hours": 720,
   "messages_per_channel": 200,
-  "pickup_count": 1
+  "pickup_count": 1,
+  "source_mode": "all",
+  "timeline_lookback_hours": 24
 }

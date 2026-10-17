@@ -17,10 +17,16 @@ async def items(values):
 
 
 def post(pid=1, content='開発が進みました', count=3, emoji='⭐'):
-    return NS(id=pid, content=content, attachments=[], author=NS(bot=False),
-              reactions=[NS(emoji=emoji, count=count, me=True)],
-              created_at=datetime.now(timezone.utc), channel=NS(id=10),
-              jump_url=f'https://discord.com/channels/1/10/{pid}')
+    message = NS(id=pid, content=content, attachments=[], embeds=[],
+                 author=NS(id=7, bot=False, display_name='日報の投稿者',
+                           display_avatar=NS(url='https://cdn.discordapp.com/avatars/7/avatar.png')),
+                 reactions=[NS(emoji=emoji, count=count, me=True)],
+                 created_at=datetime.now(timezone.utc),
+                 channel=NS(id=10, name='diary', category=NS(id=1, name='日報_A26')),
+                 jump_url=f'https://discord.com/channels/1/10/{pid}')
+    message.channel.fetch_message = AsyncMock(return_value=message)
+    return message
+
 
 
 async def test_scores_custom_emoji_and_threshold(modules):
@@ -46,7 +52,8 @@ async def test_search_excludes_private_hidden_and_outside_categories(modules, mo
     outside = channel(13, '管理者')
     guild.text_channels = [allowed, hidden, private, outside]
     monkeypatch.setattr(t, 'load_hidden_data', lambda: {'11': {}})
-    results, skipped = await t.collect(guild, t.load_settings(), user=NS(id=7))
+    config = t.load_settings(); config['source_mode'] = 'listed'
+    results, skipped = await t.collect(guild, config, user=NS(id=7))
     assert [m.id for m in results] == [10]
     assert skipped == 0
     assert allowed.history.call_args.kwargs['limit'] == 200
@@ -90,8 +97,8 @@ async def test_publish_updates_only_after_success_and_survives_restart(modules, 
     assert not await t.publish(guild)
     embed = dest.send.call_args.kwargs['embed']
     assert len(embed) <= 6000
-    assert '[日報を読む]' in embed.fields[0].value
-    assert embed.title == '🎲 日報ガチャ'
+    assert '[日報を読む' in embed.description
+    assert '日報_A26' in embed.title
     assert dest.send.call_args.kwargs['allowed_mentions'].everyone is False
 
 
@@ -110,8 +117,7 @@ async def test_permissions_change_during_collection_stops_delivery(modules, monk
     t = importlib.import_module('timeline')
     guild, dest = publishing(t, monkeypatch, tmp_path)
     monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [])
-    with pytest.raises(ValueError, match='閲覧権限'):
-        await t.publish(guild)
+    assert not await t.publish(guild)
     dest.send.assert_not_awaited()
 
 
@@ -157,6 +163,7 @@ async def test_commands_register_admin_checks_and_private_search(modules, monkey
     assert commands.tl_post.checks
     monkeypatch.setattr(t, 'collect', AsyncMock(return_value=([post()], 0)))
     inter = NS(guild=NS(id=1), user=NS(id=7), response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [NS(id=10)])
     await commands.reaction_search.callback(inter, emoji='⭐', limit=1)
     assert inter.followup.send.call_args.kwargs['ephemeral'] is True
     assert t.collect.call_args.kwargs['user'] is inter.user
@@ -187,7 +194,7 @@ async def test_manual_gacha_is_private_and_uses_user_read_permissions(modules, m
     assert inter.followup.send.call_args.kwargs['ephemeral'] is True
     assert t.collect.call_args.kwargs['user'] is inter.user
     assert t.collect.call_args.kwargs['days'] == 7
-    assert '[日報を読む]' in inter.followup.send.call_args.kwargs['embed'].fields[0].value
+    assert '[日報を読む' in inter.followup.send.call_args.kwargs['embed'].description
 
 
 async def test_manual_gacha_handles_empty_and_newly_private_sources(modules, monkeypatch):
@@ -210,3 +217,95 @@ async def test_old_settings_with_unused_ai_keys_still_load(modules, monkeypatch,
     path.write_text(json.dumps(config), encoding='utf-8')
     monkeypatch.setattr(t, 'SETTINGS_FILE', path)
     assert t.load_settings()['pickup_count'] == 1
+
+
+async def test_rich_card_has_author_avatar_image_and_readable_body(modules):
+    t = importlib.import_module('timeline')
+    message = post(content='## 今日の進捗\n\n開発が進みました。\n次はテストします。')
+    spoiler = NS(content_type='image/png', filename='secret.png', url='https://cdn.discordapp.com/secret.png', is_spoiler=lambda: True)
+    image = NS(content_type='image/jpeg', filename='diary.jpg', url='https://cdn.discordapp.com/diary.jpg', is_spoiler=lambda: False)
+    message.attachments = [spoiler, image]
+    embed = t.diary_embed(message)
+    assert embed.author.name == message.author.display_name
+    assert embed.author.icon_url == message.author.display_avatar.url
+    assert embed.image.url == image.url
+    assert '\n\n' in embed.description
+    assert '次はテストします。' in embed.description
+    assert embed.timestamp == message.created_at
+    message.attachments = []
+    original = discord.Embed(); original.set_image(url='https://example.com/post-image.png')
+    message.embeds = [original]
+    assert t.post_image(message) == 'https://example.com/post-image.png'
+    message.embeds = []
+    assert t.post_image(message) is None
+
+
+async def test_one_post_per_category_and_partial_delivery_retry(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    guild, dest = publishing(t, monkeypatch, tmp_path)
+    messages = [post(1), post(2), post(3)]
+    messages[2].channel.category = NS(id=2, name='制作')
+    t.collect.return_value = (messages, 0)
+    delivered = []
+    async def send(**kwargs):
+        if len(delivered) == 1:
+            raise http_error()
+        delivered.append(NS(author=NS(id=99), embeds=[kwargs['embed']]))
+    dest.send.side_effect = send
+    before = t.load_state()
+    with pytest.raises(discord.HTTPException):
+        await t.publish(guild)
+    assert t.load_state() == before
+    assert len(delivered) == 1
+    dest.history = lambda **kwargs: items(delivered)
+    dest.send.side_effect = None
+    assert await t.publish(guild)
+    assert dest.send.await_count == 3  # category1 success, category2 failure, category2 retry
+    assert '制作' in dest.send.call_args.kwargs['embed'].title
+    assert t.collect.call_args.args[1]['lookback_hours'] == 24
+
+
+async def test_configurable_interval_persists_and_setup_preserves_it(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    c = importlib.import_module('timeline_commands')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    inter = NS(guild=NS(id=1), response=NS(send_message=AsyncMock(), defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    await c.tl_interval.callback(inter, minutes=5, recent_hours=6)
+    assert t.load_state()['1']['interval_minutes'] == 5
+    monkeypatch.setattr(t, 'ensure_timeline', AsyncMock(return_value=NS(id=20, mention='#tl')))
+    await c.tl_setup.callback(inter)
+    assert t.load_state()['1']['enabled'] is True
+    assert t.load_state()['1']['interval_minutes'] == 5
+    assert t.load_state()['1']['timeline_lookback_hours'] == 6
+    assert t.interval_minutes(t.load_settings(), t.load_state()['1']) == 5
+    assert c.tl_interval.checks
+
+
+async def test_history_reads_are_bounded_parallel_and_skip_old_channels(modules, monkeypatch):
+    import asyncio
+    t = importlib.import_module('timeline')
+    active = 0; peak = 0
+    async def history(**kwargs):
+        nonlocal active, peak
+        active += 1; peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        yield post()
+    channels = [NS(id=i, history=Mock(side_effect=history), last_message_id=None) for i in range(8)]
+    old = NS(id=90, history=Mock(), last_message_id=discord.utils.time_snowflake(datetime.now(timezone.utc) - timedelta(days=90)))
+    monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: channels + [old])
+    result, skipped = await t.collect(NS(), t.load_settings())
+    assert len(result) == 8 and skipped == 0
+    assert 1 < peak <= 4
+    old.history.assert_not_called()
+
+
+async def test_all_mode_uses_new_categories_but_never_the_timeline_category(modules, monkeypatch):
+    t = importlib.import_module('timeline')
+    guild = NS(me=NS())
+    def channel(cid, name):
+        return NS(id=cid, name='daily', category=NS(id=cid, name=name),
+                  permissions_for=lambda _: NS(view_channel=True, read_message_history=True))
+    guild.text_channels = [channel(1, '新しい学年'), channel(2, 'タイムライン'), channel(3, '作品')]
+    monkeypatch.setattr(t, 'load_hidden_data', lambda: {})
+    assert [c.id for c in t.source_channels(guild, t.load_settings(), user=NS())] == [1, 3]
