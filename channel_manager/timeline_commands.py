@@ -29,7 +29,7 @@ async def tl_setup(interaction: discord.Interaction):
     await interaction.followup.send(
         f'✅ {channel.mention} を設定しました。定期配信を開始します。'
         '初回は設定間隔の経過後です。今すぐ投稿する場合は /tl_post を使ってください。'
-        'AI要約には .env の OPENAI_API_KEY と OPENAI_SUMMARY_MODEL が必要です。', ephemeral=True)
+        '自分だけで引く場合は /diary_gacha を使えます。', ephemeral=True)
 
 
 @bot.tree.command(name='tl_stop', description='TLの定期配信を停止します')
@@ -45,7 +45,7 @@ async def tl_stop(interaction: discord.Interaction):
     await interaction.response.send_message('TLの定期配信を停止しました。再開は /tl_setup です。', ephemeral=True)
 
 
-@bot.tree.command(name='tl_post', description='最近の投稿からAI要約とおすすめをTLへ投稿します（同期間の重複は抑止）')
+@bot.tree.command(name='tl_post', description='日報ガチャをTLへ投稿します（同期間の重複は抑止）')
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -57,6 +57,26 @@ async def tl_post(interaction: discord.Interaction):
     except (ValueError, RuntimeError) as error:
         text = str(error)
     await interaction.followup.send(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name='diary_gacha', description='ランダムな日報を1件引きます（自分だけに表示）')
+@app_commands.guild_only()
+@app_commands.checks.cooldown(1, 60, key=lambda i: (i.guild_id, i.user.id))
+@app_commands.describe(days='直近何日の日報から引くか（省略時はJSON設定）')
+async def diary_gacha(interaction: discord.Interaction,
+                      days: app_commands.Range[int, 1, 30] | None = None):
+    await interaction.response.defer(ephemeral=True)
+    config = timeline.load_settings()
+    messages, skipped = await timeline.collect(interaction.guild, config, days=days, user=interaction.user)
+    # 収集中に権限・非表示設定が変わったチャンネルは抽選から除外。
+    allowed = {c.id for c in timeline.source_channels(interaction.guild, config, user=interaction.user)}
+    candidates = [m for m in messages if m.channel.id in allowed]
+    if not candidates:
+        await interaction.followup.send('対象の日報がありません。期間・対象カテゴリ・閲覧権限を確認してください。', ephemeral=True)
+        return
+    embed = timeline.diary_embed(timeline.draw_diaries(candidates, 1), note=(
+        f'収集{len(candidates)}件から1件を抽選！各ch最新{config["messages_per_channel"]}件まで・取得不可{skipped}ch'))
+    await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.tree.command(name='reaction_search', description='リアクションの付いた最近の投稿を検索・一覧表示します')
@@ -89,7 +109,7 @@ async def reaction_search(interaction: discord.Interaction, emoji: str | None = 
 @tasks.loop(minutes=1)
 async def timeline_tick():
     for guild in bot.guilds:
-        # API失敗が続いても毎分課金リクエストを繰り返さない。
+        # 配信失敗が続いた場合は15分間隔で再試行する。
         if time.monotonic() - LAST_ATTEMPT.get(guild.id, -10000) < 900:
             continue
         LAST_ATTEMPT[guild.id] = time.monotonic()
