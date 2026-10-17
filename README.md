@@ -448,3 +448,37 @@ pullや依存更新に失敗した場合も現在のチェックアウトから�
 
 systemd参考：[サービス](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)、
 [ログアウト後の継続実行](https://www.freedesktop.org/software/systemd/man/252/loginctl.html)。
+
+## TL・AI要約・リアクション検索
+
+個人チャンネル管理Botに `/tl_setup`、`/tl_post`、`/tl_stop`、`/reaction_search` を追加しました。
+
+1. `channel_manager/timeline_settings.json` の `audience_role_names` を実際の閲覧用ロール名に、
+   `source_category_names` を収集対象のカテゴリ名に合わせます。細分化された `カテゴリ名-2` も対象です。
+2. `channel_manager/.env` に `OPENAI_API_KEY` と `OPENAI_SUMMARY_MODEL` を設定します。
+   モデルは [Responses API](https://developers.openai.com/api/docs/guides/text) に対応し、アカウントで利用できるモデルIDを指定してください。
+   API利用料が発生します。キーをJSONやGitHubへ書かないでください。
+3. 投稿本文をOpenAIへ送信し、要約とおすすめ投稿をDiscordへ掲載することを対象メンバーへ案内してください。
+4. Botを再起動し、サーバー管理権限のある人が `/tl_setup` を実行します。
+   「タイムライン」カテゴリと読み取り専用の `tl` が作られます。既存の同名TLには設定ロールの閲覧権限を再設定します。
+5. 初回配信は24時間後です。`/tl_post` で即時配信、`/tl_stop` で停止できます。
+   同一の配信時間枠内の再投稿は抑止します。設定と配信時刻は `channel_manager/data/timeline_state.json` に保存され、再起動後も継続します。
+
+TLには直近24時間の投稿全体からAIによる日本語要約、投稿数、リアクション上位5件を掲載します。
+要約は最新100件の本文（1件800文字まで）を対象とし、根拠の投稿へリンクします。
+収集対象は各テキストチャンネル最新200件までです。スレッド・フォーラム・Bot投稿・一覧チャンネル・非表示記録のあるチャンネルは収集しません。
+TL読者が読めない元チャンネルは要約・おすすめから除外し、AI待ちの間に権限が変わった場合も配信を中止します。
+リアクション数は絵文字ごとの件数の合計で、Bot自身のリアクションは除きます（ユニーク人数ではありません）。
+`recommendation_emojis` は空配列なら全絵文字を数え、例 `["⭐", "👍"]` のJSON配列で絞り込めます。
+`interval_hours`、`lookback_hours`、`pickup_count`、`minimum_reactions` などもJSONで変更できます。保存後の次の処理から反映します。
+収集上限に達する場合、全履歴の要約ではなく範囲内の振り返りとして件数を表示します。
+
+`/reaction_search emoji:⭐ days:7 minimum:2 limit:10` で任意の絵文字・期間・最低数を指定して一覧表示できます。
+`channel` を指定すれば対象を1チャンネルに絞れます。設定カテゴリ内で本人が履歴を読める投稿だけを検索し、
+結果は実行者だけに表示します。1人につき60秒に1回まで利用できます。
+
+AI APIのタイムアウト・エラー時はTLを投稿せず、配信済み時刻も更新しません。定期処理は15分以降に再試行します。
+投稿本文はBotのファイルに保存せず、APIには `store: false` を指定します。
+添付ファイルの内容はAIへ送らず、本文だけを要約します。AI要約には誤りがあり得るため元投稿を確認してください。
+Discordへ転載した要約・抜粋は元投稿を削除しても自動削除されません。
+Botには対象チャンネルの閲覧・履歴参照、TLの作成・投稿権限とMembers/Message Content Intentが必要です。

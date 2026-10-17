@@ -1,0 +1,13 @@
+{
+  "category_name": "タイムライン",
+  "channel_name": "tl",
+  "audience_role_names": ["member", "ex_member"],
+  "source_category_names": ["日報_A21", "日報_A22", "日報_A23", "日報_A24", "日報_A25", "日報_A26", "日報_外部参加"],
+  "interval_hours": 24,
+  "lookback_hours": 24,
+  "messages_per_channel": 200,
+  "summary_messages": 100,
+  "pickup_count": 5,
+  "minimum_reactions": 1,
+  "recommendation_emojis": []
+}
