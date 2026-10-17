@@ -70,6 +70,31 @@ async def tl_interval(interaction: discord.Interaction,
         '定期配信の開始・再開は /tl_setup です。', ephemeral=True)
 
 
+@bot.tree.command(name='tl_notify', description='TL更新時の全体通知をOFFまたは1回だけに設定します')
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.choices(mode=[app_commands.Choice(name='OFF', value='off'),
+                            app_commands.Choice(name='更新ごとに1回', value='once')])
+async def tl_notify(interaction: discord.Interaction, mode: str):
+    await interaction.response.defer(ephemeral=True)
+    if mode not in ('off', 'once'):
+        await interaction.followup.send('off または once を選んでください。', ephemeral=True)
+        return
+    async with timeline.lock_for(interaction.guild.id):
+        state = timeline.load_state()
+        entry = state.setdefault(str(interaction.guild.id), {})
+        if mode == 'once' and entry.get('channel_id'):
+            target = interaction.guild.get_channel(entry['channel_id'])
+            if target is not None and not target.permissions_for(interaction.guild.me).mention_everyone:
+                await interaction.followup.send('Botに全体メンションの権限を付けてから設定してください。', ephemeral=True)
+                return
+        entry['notification_mode'] = mode
+        timeline.save_state(state)
+    text = '全体通知をOFFにしました。' if mode == 'off' else 'TL更新時の最初の1投稿だけで全体通知します。候補がない回は通知しません。'
+    await interaction.followup.send(text, ephemeral=True)
+
+
 @bot.tree.command(name='tl_post', description='日報ガチャをTLへ投稿します（同期間の重複は抑止）')
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
