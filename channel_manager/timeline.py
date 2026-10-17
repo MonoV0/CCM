@@ -34,6 +34,9 @@ def load_settings():
     config.setdefault('source_mode', 'listed')
     config.setdefault('timeline_lookback_hours', 24)
     config.setdefault('repeat_cooldown_hours', 168)
+    config.setdefault('notification_mode', 'off')
+    if config['notification_mode'] not in ('off', 'once'):
+        raise ValueError('notification_mode は off または once を指定してください')
     if type(config['repeat_cooldown_hours']) is not int or not 1 <= config['repeat_cooldown_hours'] <= 8760:
         raise ValueError('repeat_cooldown_hours は1～8760時間を指定してください')
     if config['source_mode'] not in ('all', 'listed'):
@@ -157,8 +160,31 @@ def shared_audience(source, destination):
                for member in guild.members)
 
 
+def category_boundary(guild, config, destination=None):
+    """設定済みTLの実カテゴリを境界とし、未設定時は名前から探す。"""
+    anchor = destination.category if destination is not None else None
+    if anchor is None:
+        entry = load_state().get(str(guild.id), {})
+        saved = guild.get_channel(entry['channel_id']) if entry.get('channel_id') else None
+        anchor = saved.category if saved is not None else None
+    categories = guild.categories  # discord.pyがposition/id順に整列した、実際のカテゴリ順
+    if anchor is None:
+        anchor = discord.utils.get(categories, name=config['category_name'])
+    if anchor is None:
+        return set()  # 境界不明時に全カテゴリへ対象を広げない。
+    for index, category in enumerate(categories):
+        if category.id == anchor.id:
+            return {lower.id for lower in categories[index + 1:]}
+    return set()
+
+
+def notification_mode(config, entry):
+    return entry.get('notification_mode', config['notification_mode'])
+
+
 def source_channels(guild, config, *, user=None, destination=None, channel=None):
     hidden = load_hidden_data()
+    below = category_boundary(guild, config, destination)
     for source in guild.text_channels:
         if channel is not None and source.id != channel.id:
             continue
@@ -166,7 +192,7 @@ def source_channels(guild, config, *, user=None, destination=None, channel=None)
         if (not category or source.name == INDEX_CHANNEL_NAME or str(source.id) in hidden
                 or (destination and source.id == destination.id)):
             continue
-        if category.name == config['category_name']:
+        if category.id not in below or category.name == config['category_name']:
             continue
         if config.get('source_mode', 'listed') == 'listed' and not any(
                 category.name == base or category.name.startswith(base + '-')
@@ -344,6 +370,9 @@ async def publish(guild, *, force=False):
         messages, skipped = await collect(guild, recent_config, destination=destination)
         picks = pick_per_category(unpicked(messages, history))
         posted = False
+        notify = notification_mode(config, entry) == 'once'
+        already_notified = entry.get('notified_marker') == marker or any(
+            old.startswith(marker + ':') for old in sent)
         for category_id, message in picks.items():
             category_marker = f'{marker}:{category_id}'
             if category_marker in sent:
@@ -362,7 +391,15 @@ async def publish(guild, *, force=False):
             embed = diary_embed(message, title=f'📰 {message.channel.category.name} の日報',
                                 note=f'直近{recent_hours}時間から1件を抽選')
             embed.set_footer(text=f'{embed.footer.text} | {category_marker}')
-            await destination.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            announce = notify and not already_notified
+            if announce and not destination.permissions_for(guild.me).mention_everyone:
+                raise ValueError('全体通知にはBotの「@everyone、@here、すべてのロールにメンション」権限が必要です。/tl_notify mode:off で通知を停止できます。')
+            mentions = discord.AllowedMentions(everyone=True, users=False, roles=False, replied_user=False) if announce else discord.AllowedMentions.none()
+            await destination.send(content='@everyone タイムラインを更新しました。' if announce else None,
+                                   embed=embed, allowed_mentions=mentions)
+            if announce:
+                already_notified = True
+                entry['notified_marker'] = marker
             record_pick(guild.id, entry, history, message)
             posted = True
         entry['last_post'] = now.isoformat()

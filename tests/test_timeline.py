@@ -40,9 +40,9 @@ async def test_scores_custom_emoji_and_threshold(modules):
 
 async def test_search_excludes_private_hidden_and_outside_categories(modules, monkeypatch):
     t = importlib.import_module('timeline')
-    guild = NS(me=NS(id=99))
+    guild = NS(id=1, me=NS(id=99))
     def channel(cid, category, readable=True):
-        c = NS(id=cid, name='personal', category=NS(name=category), guild=guild)
+        c = NS(id=cid, name='personal', category=NS(id=cid, name=category), guild=guild)
         c.permissions_for = lambda who: NS(view_channel=readable, read_message_history=True)
         c.history = Mock(return_value=items([post(cid)]))
         return c
@@ -51,6 +51,7 @@ async def test_search_excludes_private_hidden_and_outside_categories(modules, mo
     private = channel(12, '日報_A26', False)
     outside = channel(13, '管理者')
     guild.text_channels = [allowed, hidden, private, outside]
+    guild.categories = [NS(id=5, name='タイムライン'), *(c.category for c in guild.text_channels)]
     monkeypatch.setattr(t, 'load_hidden_data', lambda: {'11': {}})
     config = t.load_settings(); config['source_mode'] = 'listed'
     results, skipped = await t.collect(guild, config, user=NS(id=7))
@@ -303,12 +304,15 @@ async def test_history_reads_are_bounded_parallel_and_skip_old_channels(modules,
 
 async def test_all_mode_uses_new_categories_but_never_the_timeline_category(modules, monkeypatch):
     t = importlib.import_module('timeline')
-    guild = NS(me=NS())
+    guild = NS(id=1, me=NS())
     def channel(cid, name):
         return NS(id=cid, name='daily', category=NS(id=cid, name=name),
                   permissions_for=lambda _: NS(view_channel=True, read_message_history=True))
     guild.text_channels = [channel(1, '新しい学年'), channel(2, 'タイムライン'), channel(3, '作品')]
+    guild.categories = [c.category for c in guild.text_channels]
     monkeypatch.setattr(t, 'load_hidden_data', lambda: {})
+    assert [c.id for c in t.source_channels(guild, t.load_settings(), user=NS())] == [3]
+    guild.categories = [guild.categories[1], guild.categories[0], guild.categories[2]]
     assert [c.id for c in t.source_channels(guild, t.load_settings(), user=NS())] == [1, 3]
 
 
@@ -367,3 +371,88 @@ async def test_manual_gacha_shares_recent_picks_and_does_not_fall_back_to_seen_p
     assert sum('embed' in r.kwargs for r in results) == 1
     assert any(r.args and '最近紹介した投稿しかないカテゴリ' in r.args[0] for r in results)
     assert list(t.load_state()['1']['recent_picks']) == ['1']
+
+
+async def test_category_boundary_prefers_saved_tl_even_after_rename_and_fails_closed(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    upper, anchor, lower = NS(id=1, name='管理'), NS(id=2, name='TLを改名'), NS(id=3, name='日報')
+    guild = NS(id=1, categories=[upper, anchor, lower], get_channel=lambda _: NS(category=anchor))
+    t.save_state({'1': {'channel_id': 20}})
+    assert t.category_boundary(guild, t.load_settings()) == {3}
+    guild.categories = [lower, anchor, upper]
+    assert t.category_boundary(guild, t.load_settings()) == {1}
+    t.save_state({})
+    assert t.category_boundary(guild, t.load_settings()) == set()
+
+
+async def test_notifications_once_for_all_categories_and_default_off(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    guild, dest = publishing(t, monkeypatch, tmp_path)
+    messages = [post(1), post(2)]
+    messages[1].channel.category = NS(id=2, name='作品')
+    t.collect.return_value = (messages, 0)
+    entry = t.load_state()['1']; entry['notification_mode'] = 'once'; t.save_entry(1, entry)
+    dest.permissions_for.return_value = NS(mention_everyone=True)
+    assert await t.publish(guild, force=True)
+    calls = dest.send.call_args_list
+    assert calls[0].kwargs['content'].startswith('@everyone')
+    assert calls[0].kwargs['allowed_mentions'].everyone is True
+    assert calls[1].kwargs['content'] is None
+    assert calls[1].kwargs['allowed_mentions'].everyone is False
+    assert t.notification_mode(t.load_settings(), {}) == 'off'
+    entry = t.load_state()['1']; entry['notification_mode'] = 'off'; t.save_entry(1, entry)
+    t.collect.return_value = ([post(3)], 0)
+    assert await t.publish(guild, force=True)
+    assert dest.send.call_args.kwargs['content'] is None
+    assert dest.send.call_args.kwargs['allowed_mentions'].everyone is False
+
+
+async def test_notification_not_repeated_after_partial_failure_and_missing_state_marker(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    guild, dest = publishing(t, monkeypatch, tmp_path)
+    messages = [post(1), post(2)]
+    messages[1].channel.category = NS(id=2, name='作品')
+    t.collect.return_value = (messages, 0)
+    entry = t.load_state()['1']; entry['notification_mode'] = 'once'; t.save_entry(1, entry)
+    dest.permissions_for.return_value = NS(mention_everyone=True)
+    delivered = []
+    async def send(**kw):
+        if len(delivered) == 1:
+            raise http_error()
+        delivered.append(NS(author=NS(id=99), embeds=[kw['embed']]))
+    dest.send.side_effect = send
+    with pytest.raises(discord.HTTPException):
+        await t.publish(guild, force=True)
+    entry = t.load_state()['1']; entry.pop('notified_marker', None); t.save_entry(1, entry)
+    dest.history = lambda **kwargs: items(delivered)
+    dest.send.side_effect = None
+    assert await t.publish(guild, force=True)
+    assert dest.send.call_args.kwargs['content'] is None
+    assert dest.send.call_args.kwargs['allowed_mentions'].everyone is False
+
+
+async def test_notification_mode_command_persists_and_checks_permission(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline'); c = importlib.import_module('timeline_commands')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    target = NS(permissions_for=lambda _: NS(mention_everyone=False))
+    inter = NS(guild=NS(id=1, me=NS(), get_channel=lambda _: target),
+               response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    t.save_state({'1': {'channel_id': 20}})
+    await c.tl_notify.callback(inter, mode='once')
+    assert 'notification_mode' not in t.load_state()['1']
+    target.permissions_for = lambda _: NS(mention_everyone=True)
+    await c.tl_notify.callback(inter, mode='once')
+    assert t.load_state()['1']['notification_mode'] == 'once'
+    await c.tl_notify.callback(inter, mode='off')
+    assert t.load_state()['1']['notification_mode'] == 'off'
+    assert c.tl_notify.checks
+
+
+async def test_empty_update_never_sends_everyone_notification(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    guild, dest = publishing(t, monkeypatch, tmp_path)
+    entry = t.load_state()['1']; entry['notification_mode'] = 'once'; t.save_entry(1, entry)
+    t.collect.return_value = ([], 0)
+    assert not await t.publish(guild, force=True)
+    dest.send.assert_not_awaited()
