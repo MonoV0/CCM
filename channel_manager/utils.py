@@ -101,6 +101,7 @@ def make_privacy_embed() -> discord.Embed:
         value=(
             "・あなたのDiscordユーザーID\n"
             "・作成された個人チャンネルのID\n"
+            "・TL・ガチャで紹介した投稿IDと紹介日時（再紹介を避けるため、設定された期間保持）\n"
             "（メッセージ内容そのものはBot側のデータベースには保存されません。Discord上のチャンネルに残るのみです）"
         ),
         inline=False

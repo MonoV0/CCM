@@ -33,6 +33,9 @@ def load_settings():
             raise ValueError(f'timeline_settings.json: {key} は空にできません')
     config.setdefault('source_mode', 'listed')
     config.setdefault('timeline_lookback_hours', 24)
+    config.setdefault('repeat_cooldown_hours', 168)
+    if type(config['repeat_cooldown_hours']) is not int or not 1 <= config['repeat_cooldown_hours'] <= 8760:
+        raise ValueError('repeat_cooldown_hours は1～8760時間を指定してください')
     if config['source_mode'] not in ('all', 'listed'):
         raise ValueError('source_mode は all または listed を指定してください')
     if type(config['timeline_lookback_hours']) is not int or not 1 <= config['timeline_lookback_hours'] <= 720:
@@ -70,6 +73,56 @@ def save_entry(guild_id, entry):
     state = load_state()
     state[str(guild_id)] = entry
     save_state(state)
+
+
+def active_pick_history(entry, config, *, now=None):
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=config['repeat_cooldown_hours'])
+    return {mid: timestamp for mid, timestamp in entry.get('recent_picks', {}).items()
+            if datetime.fromisoformat(timestamp) > cutoff}
+
+
+def cited_post_ids(embed):
+    # 以前のカード・ガチャ表示のリンクにも対応する。
+    values = [getattr(embed, 'url', None) or '', getattr(embed, 'description', None) or '']
+    values.extend(field.value for field in getattr(embed, 'fields', []))
+    return set(re.findall(r'https://discord\.com/channels/\d+/\d+/(\d+)', ' '.join(values)))
+
+
+def remember_delivery(history, previous, bot_id, *, now=None):
+    if previous.author.id != bot_id:
+        return
+    timestamp = getattr(previous, 'created_at', None) or now or datetime.now(timezone.utc)
+    for embed in previous.embeds:
+        if 'ccm-tl:' not in (embed.footer.text or ''):
+            continue
+        for mid in cited_post_ids(embed):
+            stored = history.get(mid)
+            if stored is None or datetime.fromisoformat(stored) < timestamp:
+                history[mid] = timestamp.isoformat()
+
+
+async def pickup_history(guild, entry, config, destination=None):
+    history = active_pick_history(entry, config)
+    # 更新直後は既存のTLから直近500配信分を取り込み、直前の投稿を再紹介しない。
+    if 'recent_picks' not in entry and entry.get('channel_id'):
+        destination = destination or guild.get_channel(entry['channel_id'])
+        if isinstance(destination, discord.TextChannel):
+            after = datetime.now(timezone.utc) - timedelta(hours=config['repeat_cooldown_hours'])
+            async for previous in destination.history(limit=500, after=after):
+                remember_delivery(history, previous, guild.me.id)
+    return history
+
+
+def unpicked(messages, history):
+    return [message for message in messages if str(message.id) not in history]
+
+
+def record_pick(guild_id, entry, history, message):
+    # 配信が成功した投稿だけを記録し、途中失敗後も成功分を再紹介しない。
+    history[str(message.id)] = datetime.now(timezone.utc).isoformat()
+    entry['recent_picks'] = history
+    save_entry(guild_id, entry)
 
 
 def lock_for(guild_id):
@@ -271,13 +324,17 @@ async def publish(guild, *, force=False):
         marker = f'ccm-tl:{guild.id}:{bucket}'
         # カテゴリ単位で重複抑止し、途中送信失敗時も未送信カテゴリから再開する。
         sent = set()
+        history = await pickup_history(guild, entry, config, destination)
         async for previous in destination.history(after=now - interval, limit=None):
+            remember_delivery(history, previous, guild.me.id)
             if previous.author.id == guild.me.id:
                 for original in previous.embeds:
                     footer = original.footer.text or ''
                     match = re.search(r'(ccm-tl:\d+:\d+(?::\d+)?)$', footer)
                     if match:
                         sent.add(match.group(1))
+        history = active_pick_history({'recent_picks': history}, config)
+        entry['recent_picks'] = history
         if marker in sent:  # 旧版の配信済みマーカーも引き継ぐ。
             entry['last_post'] = now.isoformat()
             save_entry(guild.id, entry)
@@ -285,7 +342,7 @@ async def publish(guild, *, force=False):
         recent_hours = entry.get('timeline_lookback_hours', config['timeline_lookback_hours'])
         recent_config = dict(config, lookback_hours=recent_hours)
         messages, skipped = await collect(guild, recent_config, destination=destination)
-        picks = pick_per_category(messages)
+        picks = pick_per_category(unpicked(messages, history))
         posted = False
         for category_id, message in picks.items():
             category_marker = f'{marker}:{category_id}'
@@ -306,6 +363,7 @@ async def publish(guild, *, force=False):
                                 note=f'直近{recent_hours}時間から1件を抽選')
             embed.set_footer(text=f'{embed.footer.text} | {category_marker}')
             await destination.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            record_pick(guild.id, entry, history, message)
             posted = True
         entry['last_post'] = now.isoformat()
         save_entry(guild.id, entry)

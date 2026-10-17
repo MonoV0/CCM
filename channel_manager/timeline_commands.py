@@ -93,26 +93,33 @@ async def diary_gacha(interaction: discord.Interaction,
     await interaction.response.defer(ephemeral=True)
     config = timeline.load_settings()
     messages, skipped = await timeline.collect(interaction.guild, config, days=days, user=interaction.user)
-    # 収集中に権限・非表示設定が変わったチャンネルは抽選から除外。
-    allowed = {c.id for c in timeline.source_channels(interaction.guild, config, user=interaction.user)}
-    candidates = [m for m in messages if m.channel.id in allowed]
-    if not candidates:
-        await interaction.followup.send('対象の日報がありません。期間・対象カテゴリ・閲覧権限を確認してください。', ephemeral=True)
-        return
-    message = timeline.draw_diaries(candidates, 1)[0]
-    try:
-        message = await message.channel.fetch_message(message.id)
-    except (discord.NotFound, discord.Forbidden):
-        await interaction.followup.send('選ばれた日報が削除されたか、閲覧できなくなりました。もう一度引いてください。', ephemeral=True)
-        return
-    allowed = {c.id for c in timeline.source_channels(interaction.guild, config, user=interaction.user)}
-    if message.channel.id not in allowed or message.author.bot:
-        await interaction.followup.send('選ばれた日報を閲覧できません。もう一度引いてください。', ephemeral=True)
-        return
-    embed = timeline.diary_embed(message, note='抽選完了！気になった日報を読んでみよう。')
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label='元の日報を開く', url=message.jump_url))
-    await interaction.followup.send(embed=embed, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    async with timeline.lock_for(interaction.guild.id):
+        # 収集中に権限・非表示設定が変わったチャンネルは抽選から除外。
+        allowed = {c.id for c in timeline.source_channels(interaction.guild, config, user=interaction.user)}
+        entry = timeline.load_state().get(str(interaction.guild.id), {})
+        history = await timeline.pickup_history(interaction.guild, entry, config)
+        candidates = timeline.unpicked([m for m in messages if m.channel.id in allowed], history)
+        if not candidates:
+            entry['recent_picks'] = history
+            timeline.save_entry(interaction.guild.id, entry)
+            await interaction.followup.send('対象の日報がありません。最近紹介した投稿しかないカテゴリはスキップします。新しい投稿を待つか、対象期間を確認してください。', ephemeral=True)
+            return
+        message = timeline.draw_diaries(candidates, 1)[0]
+        try:
+            message = await message.channel.fetch_message(message.id)
+        except (discord.NotFound, discord.Forbidden):
+            await interaction.followup.send('選ばれた日報が削除されたか、閲覧できなくなりました。もう一度引いてください。', ephemeral=True)
+            return
+        allowed = {c.id for c in timeline.source_channels(interaction.guild, config, user=interaction.user)}
+        if message.channel.id not in allowed or message.author.bot:
+            await interaction.followup.send('選ばれた日報を閲覧できません。もう一度引いてください。', ephemeral=True)
+            return
+        embed = timeline.diary_embed(message, note='抽選完了！気になった日報を読んでみよう。')
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label='元の日報を開く', url=message.jump_url))
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        timeline.record_pick(interaction.guild.id, entry, history, message)
+
 
 
 

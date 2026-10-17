@@ -19,5 +19,6 @@
   "messages_per_channel": 200,
   "pickup_count": 1,
   "source_mode": "all",
-  "timeline_lookback_hours": 24
+  "timeline_lookback_hours": 24,
+  "repeat_cooldown_hours": 168
 }

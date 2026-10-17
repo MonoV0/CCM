@@ -255,7 +255,8 @@ async def test_one_post_per_category_and_partial_delivery_retry(modules, monkeyp
     before = t.load_state()
     with pytest.raises(discord.HTTPException):
         await t.publish(guild)
-    assert t.load_state() == before
+    assert t.load_state()['1']['last_post'] == before['1']['last_post']
+    assert len(t.load_state()['1']['recent_picks']) == 1
     assert len(delivered) == 1
     dest.history = lambda **kwargs: items(delivered)
     dest.send.side_effect = None
@@ -309,3 +310,60 @@ async def test_all_mode_uses_new_categories_but_never_the_timeline_category(modu
     guild.text_channels = [channel(1, '新しい学年'), channel(2, 'タイムライン'), channel(3, '作品')]
     monkeypatch.setattr(t, 'load_hidden_data', lambda: {})
     assert [c.id for c in t.source_channels(guild, t.load_settings(), user=NS())] == [1, 3]
+
+
+async def test_repeated_only_category_is_skipped_while_another_gets_new_post(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    guild, dest = publishing(t, monkeypatch, tmp_path)
+    assert await t.publish(guild, force=True)
+    # 同じ投稿しかないカテゴリは、次の配信枠でも再利用しない。
+    assert not await t.publish(guild, force=True)
+    assert dest.send.await_count == 1
+    alternate = post(2)
+    alternate.channel.category = NS(id=2, name='新しい日報')
+    t.collect.return_value = ([post(1), alternate], 0)
+    assert await t.publish(guild, force=True)
+    assert dest.send.await_count == 2
+    assert dest.send.call_args.kwargs['embed'].url == alternate.jump_url
+    # 永続化したIDを読み直しても両方が除外される。
+    history = t.active_pick_history(t.load_state()['1'], t.load_settings())
+    assert t.unpicked([post(1), alternate], history) == []
+
+
+async def test_repeat_cooldown_expires_and_old_config_gets_default(modules):
+    t = importlib.import_module('timeline')
+    config = t.load_settings()
+    now = datetime.now(timezone.utc)
+    entry = {'recent_picks': {'1': now.isoformat(), '2': (now - timedelta(hours=169)).isoformat()}}
+    history = t.active_pick_history(entry, config, now=now)
+    assert list(history) == ['1']
+    assert [m.id for m in t.unpicked([post(1), post(2)], history)] == [2]
+    assert config['repeat_cooldown_hours'] == 168
+
+
+async def test_existing_timeline_links_seed_history_after_update(modules, monkeypatch, tmp_path):
+    t = importlib.import_module('timeline')
+    guild, dest = publishing(t, monkeypatch, tmp_path)
+    original = t.diary_embed(post(1)); original.set_footer(text='ccm-tl:1:100:1')
+    previous = NS(author=NS(id=99), created_at=datetime.now(timezone.utc) - timedelta(hours=2), embeds=[original])
+    dest.history = lambda **kwargs: items([previous])
+    assert not await t.publish(guild, force=True)
+    dest.send.assert_not_awaited()
+    assert '1' in t.load_state()['1']['recent_picks']
+
+
+async def test_manual_gacha_shares_recent_picks_and_does_not_fall_back_to_seen_post(modules, monkeypatch, tmp_path):
+    import asyncio
+    t = importlib.import_module('timeline')
+    c = importlib.import_module('timeline_commands')
+    monkeypatch.setattr(t, 'STATE_FILE', tmp_path / 'state.json')
+    monkeypatch.setattr(t, 'collect', AsyncMock(return_value=([post(1)], 0)))
+    monkeypatch.setattr(t, 'source_channels', lambda *a, **kw: [NS(id=10)])
+    def inter():
+        return NS(guild=NS(id=1), user=NS(id=7), response=NS(defer=AsyncMock()), followup=NS(send=AsyncMock()))
+    first, second = inter(), inter()
+    await asyncio.gather(c.diary_gacha.callback(first), c.diary_gacha.callback(second))
+    results = [i.followup.send.call_args for i in (first, second)]
+    assert sum('embed' in r.kwargs for r in results) == 1
+    assert any(r.args and '最近紹介した投稿しかないカテゴリ' in r.args[0] for r in results)
+    assert list(t.load_state()['1']['recent_picks']) == ['1']
