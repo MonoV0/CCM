@@ -160,22 +160,49 @@ def shared_audience(source, destination):
                for member in guild.members)
 
 
+class TimelineBoundaryError(ValueError):
+    """境界を安全に特定できない状態。Discordへ設定手順を返せる例外。"""
+
+
+def resolve_timeline_category(guild, config, destination=None):
+    """カテゴリはIDで特定し、名前での自動選択は一意な場合だけ許可する。"""
+    categories = guild.categories
+    by_id = {category.id: category for category in categories}
+    entry = load_state().get(str(guild.id), {})
+    pinned = entry.get('boundary_category_id')
+    if pinned is not None:
+        try:
+            anchor = by_id.get(int(pinned))
+        except (TypeError, ValueError):
+            anchor = None
+        if anchor is None:
+            raise TimelineBoundaryError('設定されたTL境界カテゴリが見つかりません。/tl_boundary category:対象カテゴリ で指定し直してください。')
+        return anchor
+    anchor = getattr(destination, 'category', None)
+    if anchor is None and entry.get('channel_id'):
+        try:
+            saved = guild.get_channel(int(entry['channel_id']))
+        except (TypeError, ValueError):
+            saved = None
+        anchor = getattr(saved, 'category', None)
+    if anchor is not None:
+        if anchor.id in by_id:
+            return by_id[anchor.id]
+        raise TimelineBoundaryError('TLのカテゴリ情報が一致しません。/tl_boundary category:対象カテゴリ で境界を設定してください。')
+    matches = [category for category in categories if category.name == config['category_name']]
+    if len(matches) == 1:
+        return matches[0]
+    reason = '同名のTLカテゴリが複数あります。' if matches else 'TL境界カテゴリを特定できません。'
+    raise TimelineBoundaryError(reason + '/tl_boundary category:対象カテゴリ で境界を設定してください。')
+
+
 def category_boundary(guild, config, destination=None):
-    """設定済みTLの実カテゴリを境界とし、未設定時は名前から探す。"""
-    anchor = destination.category if destination is not None else None
-    if anchor is None:
-        entry = load_state().get(str(guild.id), {})
-        saved = guild.get_channel(entry['channel_id']) if entry.get('channel_id') else None
-        anchor = saved.category if saved is not None else None
-    categories = guild.categories  # discord.pyがposition/id順に整列した、実際のカテゴリ順
-    if anchor is None:
-        anchor = discord.utils.get(categories, name=config['category_name'])
-    if anchor is None:
-        return set()  # 境界不明時に全カテゴリへ対象を広げない。
+    anchor = resolve_timeline_category(guild, config, destination)
+    categories = guild.categories
     for index, category in enumerate(categories):
         if category.id == anchor.id:
             return {lower.id for lower in categories[index + 1:]}
-    return set()
+    raise TimelineBoundaryError('TL境界カテゴリの並び順を確認できません。/tl_boundary で設定を確認してください。')
 
 
 def notification_mode(config, entry):
@@ -192,7 +219,7 @@ def source_channels(guild, config, *, user=None, destination=None, channel=None)
         if (not category or source.name == INDEX_CHANNEL_NAME or str(source.id) in hidden
                 or (destination and source.id == destination.id)):
             continue
-        if category.id not in below or category.name == config['category_name']:
+        if category.id not in below:
             continue
         if config.get('source_mode', 'listed') == 'listed' and not any(
                 category.name == base or category.name.startswith(base + '-')

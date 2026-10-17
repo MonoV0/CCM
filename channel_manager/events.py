@@ -10,6 +10,7 @@ import discord
 from discord.ext import tasks
 
 from bot_core import bot, ADMIN_ID, logger, notify_admin_error
+from timeline import TimelineBoundaryError
 from storage import (
     RULES_TEXT,
     HIDDEN_RETENTION_DAYS,
@@ -154,11 +155,14 @@ async def on_ready():
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     """スラッシュコマンド実行中に起きた例外を共通で捕捉する。
     これが無いと、コマンドがエラーで失敗しても本人にも管理者にも何も伝わらず「反応しない」ように見える。"""
-    command_name = interaction.command.name if interaction.command else "不明"
-    await notify_admin_error(f"コマンドエラー：/{command_name}（実行者：{interaction.user}）", error)
+    original = getattr(error, 'original', error)
+    boundary_error = isinstance(original, TimelineBoundaryError)
+    if not boundary_error:
+        command_name = interaction.command.name if interaction.command else "不明"
+        await notify_admin_error(f"コマンドエラー：/{command_name}（実行者：{interaction.user}）", error)
 
     try:
-        message = "⚠️ 内部エラーが発生しました。管理者に自動で通知されています。"
+        message = str(original) if boundary_error else "⚠️ 内部エラーが発生しました。管理者に自動で通知されています。"
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:

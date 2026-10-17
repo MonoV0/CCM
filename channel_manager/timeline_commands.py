@@ -26,6 +26,8 @@ async def tl_setup(interaction: discord.Interaction):
             'channel_id': channel.id, 'enabled': True,
             'last_post': datetime.now(timezone.utc).isoformat(),
         }
+        if getattr(channel, 'category', None) is not None:
+            state[str(interaction.guild.id)].setdefault('boundary_category_id', channel.category.id)
         timeline.save_state(state)
     await interaction.followup.send(
         f'✅ {channel.mention} を設定しました。定期配信を開始します。'
@@ -68,6 +70,39 @@ async def tl_interval(interaction: discord.Interaction,
         f'✅ 更新間隔を{minutes}分に設定しました。' +
         (f'対象は直近{recent_hours}時間です。' if recent_hours is not None else '') +
         '定期配信の開始・再開は /tl_setup です。', ephemeral=True)
+
+
+@bot.tree.command(name='tl_boundary', description='TL境界と対象カテゴリを確認し、必要に応じて境界を指定します')
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(category='このカテゴリより下を取得対象にする（省略で現在の設定を確認）')
+async def tl_boundary(interaction: discord.Interaction, category: discord.CategoryChannel | None = None):
+    await interaction.response.defer(ephemeral=True)
+    async with timeline.lock_for(interaction.guild.id):
+        config = timeline.load_settings()
+        state = timeline.load_state()
+        entry = state.setdefault(str(interaction.guild.id), {})
+        if category is not None:
+            if category.id not in {c.id for c in interaction.guild.categories}:
+                await interaction.followup.send('このサーバーのカテゴリを指定してください。', ephemeral=True)
+                return
+            entry['boundary_category_id'] = category.id
+            timeline.save_state(state)
+        try:
+            anchor = timeline.resolve_timeline_category(interaction.guild, config)
+            below = timeline.category_boundary(interaction.guild, config)
+        except timeline.TimelineBoundaryError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
+        target = interaction.guild.get_channel(entry['channel_id']) if entry.get('channel_id') else None
+        sources = list(timeline.source_channels(interaction.guild, config, destination=target))
+        names = [f'・{c.name} (ID: {c.id})' for c in interaction.guild.categories if c.id in below]
+        text = (f'境界: **{discord.utils.escape_mentions(anchor.name)}** (ID: {anchor.id})\n'
+                f'境界より下: {len(below)}カテゴリ／現在の条件で取得可能: {len(sources)}チャンネル\n'
+                '閲覧権限・非表示・対象カテゴリ設定によって、さらに除外される場合があります。\n\n' +
+                ('\n'.join(names)[:1300] if names else '境界より下にカテゴリがありません。TLカテゴリの位置を確認してください。'))
+        await interaction.followup.send(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.tree.command(name='tl_notify', description='TL更新時の全体通知をOFFまたは1回だけに設定します')
