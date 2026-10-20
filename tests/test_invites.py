@@ -178,12 +178,12 @@ async def test_expired_link_not_disclosed(modules):
 
 async def test_corrupt_storage_and_atomic_save_failure(modules, monkeypatch):
     service, key = pending(modules)
-    original = modules.storage.INVITE_DATA_FILE.read_text()
+    original = modules.storage.INVITE_DATA_FILE.read_text(encoding='utf-8')
     with monkeypatch.context() as patch:
         patch.setattr(modules.storage.os, 'replace', Mock(side_effect=OSError('disk full')))
         with pytest.raises(OSError): service.decide(key, 99, 55, True)
-    assert modules.storage.INVITE_DATA_FILE.read_text() == original
-    modules.storage.INVITE_DATA_FILE.write_text('{broken')
+    assert modules.storage.INVITE_DATA_FILE.read_text(encoding='utf-8') == original
+    modules.storage.INVITE_DATA_FILE.write_text('{broken', encoding='utf-8')
     with pytest.raises(json.JSONDecodeError): service.decide(key, 99, 55, True)
 
 
