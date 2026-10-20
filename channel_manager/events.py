@@ -2,7 +2,6 @@
 Botのイベントハンドラ群と定期タスク: メンバー参加/退出時の処理、
 起動処理、エラー通知、非表示チャンネルの自動削除タスクなど。
 """
-import asyncio
 import sys
 from datetime import datetime, timezone, timedelta
 
@@ -20,7 +19,7 @@ from storage import (
     save_hidden_data,
 )
 from utils import get_existing_channel, hide_channel_from_others, make_embed, make_privacy_embed
-from views import RulesView, ChannelSettingsView, ApprovalView
+from views import RulesView, ChannelSettingsView, ApprovalView, register_onboarding_views
 from invitations import restore_approval_views
 
 
@@ -57,7 +56,18 @@ async def on_member_join(member):
 
 @tasks.loop(hours=24)
 async def cleanup_expired_hidden_channels():
-    """非表示化から HIDDEN_RETENTION_DAYS 日経過したチャンネルを完全削除する定期タスク"""
+    """非表示化から HIDDEN_RETENTION_DAYS 日経過したチャンネルを完全削除する定期タスク。
+    discord.pyのループは例外で停止し、エラーハンドラ内からは再開できないため、ここで捕捉して継続する。"""
+    try:
+        await _cleanup_expired_hidden_channels()
+    except Exception as error:
+        await notify_admin_error(
+            "定期タスク（非表示チャンネル自動削除）でエラーが発生しました。タスクは継続し、次回の実行で再試行します。",
+            error
+        )
+
+
+async def _cleanup_expired_hidden_channels():
     hidden_data = load_hidden_data()
     if not hidden_data:
         return
@@ -141,6 +151,8 @@ async def on_ready():
     # チャンネル設定パネルの永続View登録。所有者情報を持たないテンプレートなので
     # これを1回登録するだけで、既存の全チャンネルに設置済みのパネルもBot再起動後に機能し続ける。
     bot.add_view(ChannelSettingsView())
+    # オンボーディングのボタンも、手続き途中で再起動しても押せるようにする。
+    register_onboarding_views()
 
     print(f"起動しました：{bot.user}")
 
@@ -157,12 +169,21 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
     これが無いと、コマンドがエラーで失敗しても本人にも管理者にも何も伝わらず「反応しない」ように見える。"""
     original = getattr(error, 'original', error)
     boundary_error = isinstance(original, TimelineBoundaryError)
-    if not boundary_error:
+    # クールダウン・権限不足・DMでの実行などは利用者側の状況なので、管理者へ通知しない。
+    if isinstance(error, discord.app_commands.CommandOnCooldown):
+        message = f"⏳ 連続実行はできません。{error.retry_after:.0f}秒後にもう一度お試しください。"
+    elif isinstance(error, discord.app_commands.NoPrivateMessage):
+        message = "⚠️ このコマンドはサーバー内で実行してください。"
+    elif isinstance(error, discord.app_commands.CheckFailure):
+        message = "⚠️ このコマンドを実行する権限がありません。"
+    elif boundary_error:
+        message = str(original)
+    else:
         command_name = interaction.command.name if interaction.command else "不明"
         await notify_admin_error(f"コマンドエラー：/{command_name}（実行者：{interaction.user}）", error)
+        message = "⚠️ 内部エラーが発生しました。管理者に自動で通知されています。"
 
     try:
-        message = str(original) if boundary_error else "⚠️ 内部エラーが発生しました。管理者に自動で通知されています。"
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:
@@ -178,14 +199,3 @@ async def on_error(event_name, *args, **kwargs):
         await notify_admin_error(f"イベントエラー：{event_name}", exc_value)
     else:
         logger.error(f"イベントエラー：{event_name}（詳細不明）")
-
-@cleanup_expired_hidden_channels.error
-async def cleanup_expired_hidden_channels_error(error):
-    """定期タスクは例外が起きると何も知らせずに完全停止するため、通知した上で再起動を試みる"""
-    await notify_admin_error(
-        "定期タスク（非表示チャンネル自動削除）でエラーが発生し停止しました。自動で再起動を試みます。",
-        error
-    )
-    await asyncio.sleep(60)
-    if not cleanup_expired_hidden_channels.is_running():
-        cleanup_expired_hidden_channels.start()

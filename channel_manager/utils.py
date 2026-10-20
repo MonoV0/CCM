@@ -182,27 +182,32 @@ async def get_existing_channel(guild, member):
         c for c in guild.categories if is_personal_channel_category(c.name, all_category_names)
     ]
 
+    # 他人に紐付いたチャンネルと、他人の非表示（退出済み）チャンネルは候補にしない。
+    # 名前一致だけで紐付けると、ユーザー名を変えて他人のチャンネルの管理権限を取得できてしまう。
+    claimed = {cid for uid, cid in data.items() if uid != user_id}
+    claimed |= {cid for cid, info in load_hidden_data().items() if str(info.get("user_id")) != user_id}
+
+    def candidates():
+        for category in target_categories:
+            for channel in category.channels:
+                if channel.name != INDEX_CHANNEL_NAME and str(channel.id) not in claimed:
+                    yield channel
+
     # 1st pass: 「manage_channels権限を持っている」＝本当の所有者だけが持つ権限で判定する。
     # 単に channel.overwrites に含まれているだけ（例：管理者が/leaveの非表示機能で
     # 閲覧権限だけ付与されているケースなど）は所有者とは判定しない。
-    for category in target_categories:
-        for channel in category.channels:
-            if channel.name == INDEX_CHANNEL_NAME:
-                continue
-            if channel.overwrites_for(member).manage_channels is True:
-                data[user_id] = str(channel.id)
-                save_data(data)
-                return channel
+    for channel in candidates():
+        if channel.overwrites_for(member).manage_channels is True:
+            data[user_id] = str(channel.id)
+            save_data(data)
+            return channel
 
     # 2nd pass: 上記で見つからなければ、チャンネル名の一致のみで判定（弱い手がかりなので最終手段）
-    for category in target_categories:
-        for channel in category.channels:
-            if channel.name == INDEX_CHANNEL_NAME:
-                continue
-            if channel.name == channel_name:
-                data[user_id] = str(channel.id)
-                save_data(data)
-                return channel
+    for channel in candidates():
+        if channel.name == channel_name:
+            data[user_id] = str(channel.id)
+            save_data(data)
+            return channel
 
     return None
 

@@ -3,6 +3,9 @@
 """
 import json
 import logging
+import os
+import tempfile
+import time
 from pathlib import Path
 
 log = logging.getLogger("stage-bot")
@@ -23,13 +26,28 @@ def load_json(path: Path, default):
             with path.open("r", encoding="utf-8") as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            log.warning("%s の読み込みに失敗しました。初期値を使用します。", path)
+            # 次回の保存で上書きして記録を失わないよう、壊れたファイルは退避してから初期値で続行する。
+            backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+            try:
+                os.replace(path, backup)
+                log.error("%s の読み込みに失敗しました。%s に退避し、初期値を使用します。", path, backup)
+            except OSError:
+                log.exception("%s の読み込みと退避に失敗しました。初期値を使用します。", path)
     return default
 
 
 def save_json(path: Path, data) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """一時ファイルへ書いてから置き換え、書き込み途中の停止でJSONを壊さない。"""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 guild_config: dict = load_json(GUILD_CONFIG_PATH, {})
