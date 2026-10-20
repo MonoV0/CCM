@@ -18,6 +18,27 @@ HIDDEN_RETENTION_DAYS = 30
 INVITE_DATA_FILE = Path("invite_requests.json")
 
 
+def atomic_write_json(path: Path, data, *, prefix: str | None = None, **dump_kwargs):
+    """一時ファイルへ書いてから置き換え、書き込み途中の停止でJSONを壊さない。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=prefix or f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, **dump_kwargs)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def load_invite_requests() -> dict:
     """破損時は空データに戻さず、招待処理を停止する。"""
     if not INVITE_DATA_FILE.exists():
@@ -40,21 +61,7 @@ def edit_invite_requests():
         try:
             data = load_invite_requests()
             yield data
-            fd, name = tempfile.mkstemp(prefix=".invite-", dir=INVITE_DATA_FILE.parent)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(data, stream, ensure_ascii=False, indent=2)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(name, INVITE_DATA_FILE)
-                directory = os.open(INVITE_DATA_FILE.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
-            finally:
-                if os.path.exists(name):
-                    os.unlink(name)
+            atomic_write_json(INVITE_DATA_FILE, data, prefix=".invite-", ensure_ascii=False, indent=2)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -65,8 +72,7 @@ def load_data() -> dict:
         return json.load(f)
 
 def save_data(data: dict):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(DATA_FILE, data, indent=2)
 
 def load_hidden_data() -> dict:
     """{channel_id(str): {"user_id": str, "hidden_at": iso8601}} を保持する"""
@@ -76,8 +82,7 @@ def load_hidden_data() -> dict:
         return json.load(f)
 
 def save_hidden_data(data: dict):
-    with open(HIDDEN_DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(HIDDEN_DATA_FILE, data, indent=2)
 
 def load_starred_data() -> dict:
     """{user_id(str): {"channels": [channel_id(str), ...], "category_id": str|None, "index_channel_id": str|None}} を保持する"""
@@ -87,8 +92,7 @@ def load_starred_data() -> dict:
         return json.load(f)
 
 def save_starred_data(data: dict):
-    with open(STARRED_DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(STARRED_DATA_FILE, data, indent=2)
 
 GRADE_CATEGORIES = {
     "A21": "日報_A21",

@@ -2,16 +2,14 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
 import re
 import random
-import tempfile
 from urllib.parse import urlparse
 
 import discord
 
-from storage import load_hidden_data, INDEX_CHANNEL_NAME
+from storage import atomic_write_json, load_hidden_data, INDEX_CHANNEL_NAME
 
 SETTINGS_FILE = Path(__file__).with_name('timeline_settings.json')
 STATE_FILE = Path('data/timeline_state.json')
@@ -61,15 +59,7 @@ def load_state():
 
 
 def save_state(state):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(dir=STATE_FILE.parent, prefix='.timeline-')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(state, stream, ensure_ascii=False, indent=2)
-        os.replace(name, STATE_FILE)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+    atomic_write_json(STATE_FILE, state, prefix='.timeline-', ensure_ascii=False, indent=2)
 
 
 def save_entry(guild_id, entry):

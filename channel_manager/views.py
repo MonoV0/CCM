@@ -5,6 +5,8 @@ discord.ui のモーダル・ビュー定義まとめ。
 """
 from onboarding import finish_onboarding
 
+import asyncio
+
 import discord
 
 from storage import (
@@ -38,11 +40,26 @@ from utils import (
 )
 
 
+# 二重クリックで個人チャンネルが重複作成されないよう、ユーザー単位で直列化する。
+_onboarding_locks: dict[int, asyncio.Lock] = {}
+
+
+def onboarding_lock(user_id: int) -> asyncio.Lock:
+    return _onboarding_locks.setdefault(user_id, asyncio.Lock())
+
+
+def register_onboarding_views():
+    """再起動後も、ようこそチャンネルや手続き途中のボタンが動くよう永続Viewとして登録する。"""
+    for view in (RulesView(), RoleSelectView(), GradeSelectView()):
+        bot.add_view(view)
+
+
 class RulesView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="✅ 規約とデータの取り扱いに同意します", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ 規約とデータの取り扱いに同意します", style=discord.ButtonStyle.success,
+                       custom_id="ccm:onboarding:rules")
     async def rules_confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = make_embed(
             step=2,
@@ -56,7 +73,8 @@ class RoleSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🎓 在学生・既卒生", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🎓 在学生・既卒生", style=discord.ButtonStyle.primary, row=0,
+                       custom_id="ccm:onboarding:member")
     async def member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
@@ -70,21 +88,24 @@ class RoleSelectView(discord.ui.View):
         embed = make_embed(step=3, title="📅 学年を選んでください", description="あなたの学年を選択してください。")
         await interaction.followup.send(embed=embed, view=GradeSelectView(), ephemeral=True)
 
-    @discord.ui.button(label="👤 外部参加", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="👤 外部参加", style=discord.ButtonStyle.secondary, row=0,
+                       custom_id="ccm:onboarding:ex_member")
     async def ex_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        existing = await get_existing_channel(interaction.guild, interaction.user)
-        role = discord.utils.get(interaction.guild.roles, name="ex_member")
-        if role:
-            await interaction.user.add_roles(role)
-        if existing:
-            await restore_channel_permissions(existing, interaction.guild, interaction.user)
-            personal_channel = existing
-        else:
-            personal_channel = await create_personal_channel(interaction.guild, interaction.user, "日報_外部参加")
+        async with onboarding_lock(interaction.user.id):
+            existing = await get_existing_channel(interaction.guild, interaction.user)
+            role = discord.utils.get(interaction.guild.roles, name="ex_member")
+            if role:
+                await interaction.user.add_roles(role)
+            if existing:
+                await restore_channel_permissions(existing, interaction.guild, interaction.user)
+                personal_channel = existing
+            else:
+                personal_channel = await create_personal_channel(interaction.guild, interaction.user, "日報_外部参加")
         await finish_onboarding(interaction, personal_channel, restored=existing is not None)
 
-    @discord.ui.button(label="🔍 すでにチャンネルを持っている", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="🔍 すでにチャンネルを持っている", style=discord.ButtonStyle.success, row=1,
+                       custom_id="ccm:onboarding:existing")
     async def already_have_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
@@ -102,7 +123,8 @@ class RoleSelectView(discord.ui.View):
         await restore_channel_permissions(existing, interaction.guild, interaction.user)
         await finish_onboarding(interaction, existing, restored=True)
 
-    @discord.ui.button(label="← 戻る", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="← 戻る", style=discord.ButtonStyle.danger, row=2,
+                       custom_id="ccm:onboarding:back_to_rules")
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member_role = discord.utils.get(interaction.guild.roles, name="member")
         ex_member_role = discord.utils.get(interaction.guild.roles, name="ex_member")
@@ -133,23 +155,26 @@ class GradeSelectView(discord.ui.View):
 
 class GradeButton(discord.ui.Button):
     def __init__(self, grade, category_name, row):
-        super().__init__(label=grade, style=discord.ButtonStyle.primary, row=row)
+        super().__init__(label=grade, style=discord.ButtonStyle.primary, row=row,
+                         custom_id=f"ccm:onboarding:grade:{grade}")
         self.category_name = category_name
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        existing = await get_existing_channel(interaction.guild, interaction.user)
-        if existing:
-            await restore_channel_permissions(existing, interaction.guild, interaction.user)
-            personal_channel = existing
-        else:
-            personal_channel = await create_personal_channel(interaction.guild, interaction.user, self.category_name)
+        async with onboarding_lock(interaction.user.id):
+            existing = await get_existing_channel(interaction.guild, interaction.user)
+            if existing:
+                await restore_channel_permissions(existing, interaction.guild, interaction.user)
+                personal_channel = existing
+            else:
+                personal_channel = await create_personal_channel(interaction.guild, interaction.user, self.category_name)
         await finish_onboarding(interaction, personal_channel, restored=existing is not None)
 
 
 class BackToRoleButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="← 戻る", style=discord.ButtonStyle.danger, row=2)
+        super().__init__(label="← 戻る", style=discord.ButtonStyle.danger, row=2,
+                         custom_id="ccm:onboarding:back_to_role")
 
     async def callback(self, interaction: discord.Interaction):
         member_role = discord.utils.get(interaction.guild.roles, name="member")
@@ -369,22 +394,28 @@ class RenameModal(discord.ui.Modal, title="チャンネル名変更"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # 名前変更はレート制限（10分に2回）で待たされることがあるため、先に応答を確保する。
+        await interaction.response.defer(ephemeral=True, thinking=True)
         existing = await get_existing_channel(interaction.guild, interaction.user)
         if not existing:
-            await interaction.response.send_message(
-                "個人チャンネルが見つかりませんでした。",
-                ephemeral=True
-            )
+            await interaction.followup.send("個人チャンネルが見つかりませんでした。", ephemeral=True)
             return
 
         new_name = self.new_name.value.lower().replace(" ", "-")
-        await existing.edit(name=new_name)
+        try:
+            await existing.edit(name=new_name)
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "❌ チャンネル名を変更できませんでした。Discordの制限で名前の変更は10分間に2回までです。時間を置いて再試行してください。",
+                ephemeral=True,
+            )
+            return
         if existing.category:
-            await update_channel_index(interaction.guild, existing.category)
-        await interaction.response.send_message(
-            f"チャンネル名を **{new_name}** に変更しました！",
-            ephemeral=True
-        )
+            try:
+                await update_channel_index(interaction.guild, existing.category)
+            except discord.HTTPException:
+                logger.exception("チャンネル %s の一覧更新に失敗しました。", existing.id)
+        await interaction.followup.send(f"チャンネル名を **{new_name}** に変更しました！", ephemeral=True)
 
 class LeaveConfirmView(discord.ui.View):
     def __init__(self, channel):
@@ -531,6 +562,8 @@ class ChannelSettingsView(discord.ui.View):
 
     @discord.ui.button(label="⭐ このチャンネルをお気に入りに追加/解除", style=discord.ButtonStyle.secondary, custom_id="star_toggle")
     async def toggle_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # カテゴリ作成や一覧の書き直しで3秒を超え得るため、先に応答を確保する。
+        await interaction.response.defer(ephemeral=True, thinking=True)
         data = load_starred_data()
         user_id = str(interaction.user.id)
         channel_id = str(interaction.channel.id)
@@ -545,7 +578,7 @@ class ChannelSettingsView(discord.ui.View):
             if entry.get("index_channel_id"):
                 await rebuild_favorites_index(interaction.guild, interaction.user, entry)
             save_starred_data(data)
-            await interaction.response.send_message("⭐ お気に入りから解除しました。", ephemeral=True)
+            await interaction.followup.send("⭐ お気に入りから解除しました。", ephemeral=True)
         else:
             starred.append(channel_id)
             entry["channels"] = starred
@@ -554,4 +587,4 @@ class ChannelSettingsView(discord.ui.View):
             data[user_id] = entry
             await rebuild_favorites_index(interaction.guild, interaction.user, entry)
             save_starred_data(data)
-            await interaction.response.send_message("⭐ お気に入りに登録しました。", ephemeral=True)
+            await interaction.followup.send("⭐ お気に入りに登録しました。", ephemeral=True)
