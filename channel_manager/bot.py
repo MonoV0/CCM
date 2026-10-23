@@ -24,6 +24,7 @@ import views  # noqa: F401
 import events  # noqa: F401
 import commands  # noqa: F401
 import timeline_commands  # noqa: F401
+import omikuji_commands  # noqa: F401
 
 
 if __name__ == "__main__":
