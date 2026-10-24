@@ -3,9 +3,11 @@ Botのイベントハンドラ群と定期タスク: メンバー参加/退出�
 起動処理、エラー通知、非表示チャンネルの自動削除タスクなど。
 """
 import sys
+import asyncio
 from datetime import datetime, timezone, timedelta
 
 import discord
+import aiohttp
 from discord.ext import tasks
 
 from bot_core import bot, ADMIN_ID, logger, notify_admin_error
@@ -21,6 +23,34 @@ from storage import (
 from utils import get_existing_channel, hide_channel_from_others, make_embed, make_privacy_embed
 from views import RulesView, ChannelSettingsView, ApprovalView, register_onboarding_views
 from invitations import restore_approval_views
+
+_command_sync_task = None
+_commands_synced = False
+
+
+async def sync_commands_with_retry():
+    """一時的なAPI障害では起動処理を止めず、間隔を広げて同期を再試行する。"""
+    global _commands_synced
+    delay = 30
+    while not bot.is_closed():
+        try:
+            commands = await bot.tree.sync()
+        except discord.HTTPException as error:
+            if error.status < 500 and error.status != 429:
+                logger.exception('コマンド同期に失敗しました（設定・権限を確認してください）')
+                return
+            logger.warning('コマンド同期のHTTP障害。%s秒後に再試行します（status=%s）', delay, error.status)
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as error:
+            logger.warning('コマンド同期の通信障害。%s秒後に再試行します（%s）', delay, type(error).__name__)
+        except Exception:
+            logger.exception('コマンド同期に失敗しました（実装・コマンド定義を確認してください）')
+            return
+        else:
+            _commands_synced = True
+            logger.info('スラッシュコマンドを%s件同期しました。', len(commands))
+            return
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 300)
 
 
 @bot.event
@@ -140,11 +170,11 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_ready():
+    global _command_sync_task
     try:
         restore_approval_views(ApprovalView)
     except Exception as error:
         await notify_admin_error("招待審査の復元失敗（招待は停止、既存機能は継続）", error)
-    await bot.tree.sync()
     if not cleanup_expired_hidden_channels.is_running():
         cleanup_expired_hidden_channels.start()
 
@@ -153,6 +183,10 @@ async def on_ready():
     bot.add_view(ChannelSettingsView())
     # オンボーディングのボタンも、手続き途中で再起動しても押せるようにする。
     register_onboarding_views()
+
+    # on_readyは再接続でも呼ばれる。実行中・成功済みの同期を重複させない。
+    if not _commands_synced and (_command_sync_task is None or _command_sync_task.done()):
+        _command_sync_task = asyncio.create_task(sync_commands_with_retry())
 
     print(f"起動しました：{bot.user}")
 
