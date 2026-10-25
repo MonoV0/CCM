@@ -17,7 +17,7 @@ async def modules(request, tmp_path, monkeypatch):
     source = Path(__file__).resolve().parents[1] / request.param
     root = tmp_path / request.param
     shutil.copytree(source, root, ignore=shutil.ignore_patterns('data', '__pycache__', '*.log', '.env'))
-    names = ['timeline', 'timeline_commands', 'storage', 'bot_core', 'utils', 'operations', 'stage_context', 'onboarding', 'invitations', 'updater', 'views', 'events', 'commands']
+    names = ['interaction_lifecycle', 'omikuji', 'omikuji_commands', 'timeline', 'timeline_commands', 'storage', 'bot_core', 'utils', 'operations', 'stage_context', 'onboarding', 'invitations', 'updater', 'views', 'events', 'commands']
     previous = {n: sys.modules.pop(n) for n in names if n in sys.modules}
     monkeypatch.chdir(root)
     monkeypatch.syspath_prepend(str(root))

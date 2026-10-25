@@ -12,6 +12,7 @@ from discord.ext import tasks
 
 from bot_core import bot, ADMIN_ID, logger, notify_admin_error
 from timeline import TimelineBoundaryError
+from interaction_lifecycle import unusable_interaction, log_unusable_interaction
 from storage import (
     RULES_TEXT,
     HIDDEN_RETENTION_DAYS,
@@ -202,6 +203,10 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
     """スラッシュコマンド実行中に起きた例外を共通で捕捉する。
     これが無いと、コマンドがエラーで失敗しても本人にも管理者にも何も伝わらず「反応しない」ように見える。"""
     original = getattr(error, 'original', error)
+    if unusable_interaction(original):
+        # 既に拒否された操作へのsend_message/followup再送は成功しない。
+        log_unusable_interaction(interaction, original)
+        return
     boundary_error = isinstance(original, TimelineBoundaryError)
     # クールダウン・権限不足・DMでの実行などは利用者側の状況なので、管理者へ通知しない。
     if isinstance(error, discord.app_commands.CommandOnCooldown):
