@@ -1,7 +1,36 @@
 """UIとイベントが共有するステージ操作。UIモジュールには依存しない。"""
 import discord
+import logging
 
 from storage import temp_channels, save_temp_channels
+
+log = logging.getLogger("stage-bot")
+PARTICIPANT_PERMISSIONS = {
+    "send_messages": True,
+    "read_message_history": True,
+    "request_to_speak": True,
+}
+
+
+def participant_overwrites(guild):
+    # 閲覧・接続は公開状態と個別招待に従う。ロールでは許可しない。
+    return {
+        role: discord.PermissionOverwrite(**PARTICIPANT_PERMISSIONS)
+        for role in guild.roles if role.name in ("member", "ex_member")
+    }
+
+
+async def repair_participant_permissions(channel):
+    """旧バージョンの稼働中ステージを補正する。無関係な権限・個人設定は維持する。"""
+    for role in participant_overwrites(channel.guild):
+        overwrite = channel.overwrites_for(role)
+        if all(getattr(overwrite, key) is True for key in PARTICIPANT_PERMISSIONS):
+            continue
+        overwrite.update(**PARTICIPANT_PERMISSIONS)
+        try:
+            await channel.set_permissions(role, overwrite=overwrite, reason="ステージ参加者のチャット・発言リクエスト権限を補正")
+        except discord.HTTPException:
+            log.exception("ステージ参加権限の補正に失敗しました: channel_id=%s role_id=%s", channel.id, role.id)
 
 
 def is_blocked(channel_id: int, user_id: int) -> bool:
