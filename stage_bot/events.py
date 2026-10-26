@@ -8,7 +8,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from operations import maybe_delete_temp_channel
+from operations import maybe_delete_temp_channel, participant_overwrites, repair_participant_permissions
 
 import bot_core
 from bot_core import bot, log, notify_owner_error
@@ -56,6 +56,8 @@ async def on_ready():
             continue
         if isinstance(channel, discord.StageChannel) and len(channel.members) == 0:
             await maybe_delete_temp_channel(channel)
+        elif isinstance(channel, discord.StageChannel):
+            await repair_participant_permissions(channel)
     save_temp_channels()
 
     # 起動時に所有者へ通知。クラッシュ→再起動を繰り返している場合はDMが連続で届くので気づきやすい。
@@ -126,9 +128,11 @@ async def create_temp_stage(member: discord.Member, config: dict) -> Optional[di
             view_channel=True, connect=True, manage_channels=True, move_members=True, mute_members=True, send_messages=True, read_message_history=True, stream=True
         ),
         member: discord.PermissionOverwrite(
-            view_channel=True, connect=True, manage_channels=True, move_members=True, mute_members=True, request_to_speak=True, stream=True
+            view_channel=True, connect=True, manage_channels=True, move_members=True, mute_members=True, request_to_speak=True, stream=True,
+            send_messages=True, read_message_history=True
         ),
     }
+    overwrites.update(participant_overwrites(guild))
 
     try:
         stage_channel = await guild.create_stage_channel(
