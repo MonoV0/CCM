@@ -9,6 +9,7 @@ from bot_core import bot, ADMIN_ID, logger
 from storage import load_data, load_hidden_data, GRADE_CATEGORIES
 from utils import is_personal_channel_category
 from omikuji import collect, workbook_bytes
+from interaction_lifecycle import defer_export
 
 JOBS = {}
 
@@ -34,7 +35,8 @@ async def omikuji_export(interaction: discord.Interaction,
     if interaction.user.id != ADMIN_ID:
         await interaction.response.send_message('管理者本人のみ使用できます。', ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    if not await defer_export(interaction):
+        return
     key = interaction.guild.id
     job = JOBS.get(key)
     if job and not job['task'].done():
