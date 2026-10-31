@@ -2,6 +2,7 @@
 チャンネル操作まわりの共通処理: 個人チャンネルの検索・作成・権限復元、
 お気に入り機能、チャンネル一覧indexの更新、embed生成ヘルパーなど。
 """
+import asyncio
 from datetime import datetime, timezone
 
 import discord
@@ -17,6 +18,44 @@ from storage import (
     HIDDEN_RETENTION_DAYS,
 )
 from bot_core import ADMIN_ID, logger
+
+_index_locks = {}
+
+
+def visible_to_index_audience(channel, index_channel):
+    """一覧を見られる全ロール・メンバーが閲覧可能なチャンネルだけを掲載する。"""
+    guild = channel.guild
+    if any(not isinstance(target, discord.Role) and overwrite.view_channel is True
+           and guild.get_member(target.id) is None
+           for target, overwrite in index_channel.overwrites.items()):
+        return False  # 一覧の個別閲覧者が未キャッシュなら公開範囲を確認できない。
+    for role in guild.roles:
+        if index_channel.permissions_for(role).view_channel and not channel.permissions_for(role).view_channel:
+            return False
+    for member in guild.members:
+        if index_channel.permissions_for(member).view_channel and not channel.permissions_for(member).view_channel:
+            return False
+    # 未キャッシュのメンバーの個別拒否は、一覧の閲覧可否を確認できないため掲載しない。
+    return not any(
+        not isinstance(target, discord.Role) and overwrite.view_channel is False
+        and guild.get_member(target.id) is None
+        for target, overwrite in channel.overwrites.items()
+    )
+
+
+async def refresh_existing_channel_indexes(guild, categories=None):
+    """既存の一覧のみを更新する。対象外カテゴリに新しい一覧は作らない。"""
+    seen = set()
+    for category in guild.categories if categories is None else categories:
+        if category is None or category.id in seen:
+            continue
+        seen.add(category.id)
+        if not any(isinstance(c, discord.TextChannel) and c.name == INDEX_CHANNEL_NAME for c in category.channels):
+            continue
+        try:
+            await update_channel_index(guild, category)
+        except Exception:
+            logger.exception("チャンネル一覧の自動更新に失敗しました: guild_id=%s category_id=%s", guild.id, category.id)
 
 
 def get_channel_owner_id(channel_id: int) -> int | None:
@@ -262,6 +301,13 @@ async def get_or_create_available_category(guild, base_name):
         suffix += 1
 
 async def update_channel_index(guild, category):
+    # 権限イベントと手動更新が重なっても古い一覧が後から書き戻されないよう直列化する。
+    lock = _index_locks.setdefault((guild.id, category.id), asyncio.Lock())
+    async with lock:
+        await _update_channel_index(guild, category)
+
+
+async def _update_channel_index(guild, category):
     """カテゴリ内の個人チャンネル一覧をindexチャンネルに書き出す（ピン留め・先頭固定）"""
     member_role = discord.utils.get(guild.roles, name="member")
     ex_member_role = discord.utils.get(guild.roles, name="ex_member")
@@ -282,6 +328,15 @@ async def update_channel_index(guild, category):
     except Exception:
         pass
 
+    # 古いリンクを残さない。削除済み以外の失敗は更新失敗として呼び出し元へ返す。
+    async for msg in index_channel.history(limit=None):
+        if msg.author == guild.me:
+            try:
+                await msg.delete()
+            except discord.NotFound:
+                pass
+
+    # 履歴取得・削除中の権限変更も反映するため、掲載内容は最後に組み立てる。
     hidden_data = load_hidden_data()
     data = load_data()
     # channel_id -> user_id の逆引きを作る（誰のチャンネルかを一覧に併記するため）
@@ -292,6 +347,7 @@ async def update_channel_index(guild, category):
         if c.id != index_channel.id
         and isinstance(c, discord.TextChannel)
         and str(c.id) not in hidden_data
+        and visible_to_index_audience(c, index_channel)
     ]
 
     def sort_key(c):
@@ -321,14 +377,6 @@ async def update_channel_index(guild, category):
             current = ""
         current += line + "\n"
     chunks.append(current)
-
-    # 既存のBot投稿メッセージを削除してから最新版を投稿し直す
-    async for msg in index_channel.history(limit=50):
-        if msg.author == guild.me:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
 
     for chunk in chunks:
         sent = await index_channel.send(chunk)
