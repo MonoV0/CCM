@@ -2,6 +2,7 @@
 Botのイベントハンドラ群: 起動処理、エラー通知、ボイスチャンネル参加時の
 一時ステージ作成・削除など。
 """
+import asyncio
 import sys
 from typing import Optional
 
@@ -21,6 +22,45 @@ from views import (
     SimplePanelView,
     ReactionTriggerView,
 )
+
+STAGE_JOIN_TIMEOUT = 10
+
+
+async def invite_creator_to_speak(member: discord.Member, channel: discord.StageChannel) -> bool:
+    """移動先のキャッシュ更新を待ち、別チャンネルに発言操作を送らない。"""
+    def has_joined():
+        voice = member.voice
+        return voice is not None and voice.channel is not None and voice.channel.id == channel.id
+
+    def joined_stage(changed_member, before, after):
+        return (
+            changed_member.id == member.id
+            and changed_member.guild.id == member.guild.id
+            and after.channel is not None and after.channel.id == channel.id
+        )
+
+    if not has_joined():
+        try:
+            # wait_forは呼び出し時にリスナーを登録する。上のキャッシュ確認から
+            # 登録までawaitを挟まないため、その間の入室イベントを取りこぼさない。
+            await bot.wait_for("voice_state_update", check=joined_stage, timeout=STAGE_JOIN_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.warning("作成者のステージ入室確認がタイムアウトしました: guild_id=%s channel_id=%s user_id=%s",
+                        member.guild.id, channel.id, member.id)
+            return False
+
+    # 入室イベント後、実行が再開するまでに退出・移動している場合も操作しない。
+    if not has_joined():
+        log.warning("作成者が対象ステージから移動したため発言招待を中止しました: guild_id=%s channel_id=%s user_id=%s",
+                    member.guild.id, channel.id, member.id)
+        return False
+    try:
+        await member.edit(suppress=False)
+    except discord.HTTPException:
+        log.exception("作成者のスピーカー招待に失敗しました: guild_id=%s channel_id=%s user_id=%s",
+                      member.guild.id, channel.id, member.id)
+        return False
+    return True
 
 
 async def setup_hook():
@@ -146,29 +186,43 @@ async def create_temp_stage(member: discord.Member, config: dict) -> Optional[di
     temp_channels[str(stage_channel.id)] = {"guild_id": guild.id, "password": None, "invite_msg_ids": [], "sub_admins": [], "blocked_users": [], "tickets": {}, "reaction_thread_id": None}
     save_temp_channels()
 
+    warnings = []
+    moved = False
     try:
         await member.move_to(stage_channel)
+        moved = True
     except discord.HTTPException:
-        pass
+        log.exception("作成者のステージへの移動に失敗しました: guild_id=%s channel_id=%s user_id=%s",
+                      guild.id, stage_channel.id, member.id)
+        warnings.append("⚠️ 自動移動に失敗しました。上のチャンネルから手動で入室してください。")
 
+    started = False
     try:
         await stage_channel.create_instance(topic=DEFAULT_TOPIC_TEMPLATE.format(username=member.display_name)[:120])
+        started = True
     except discord.HTTPException:
-        pass
+        log.exception("ステージの開始に失敗しました: guild_id=%s channel_id=%s user_id=%s",
+                      guild.id, stage_channel.id, member.id)
+        warnings.append("⚠️ ステージの開始に失敗しました。管理者にBotの権限とログを確認してもらってください。")
+
+    invited = False
+    if moved and started:
+        invited = await invite_creator_to_speak(member, stage_channel)
+        if not invited:
+            warnings.append("⚠️ 自動のスピーカー設定を完了できませんでした。ステージ内の操作でスピーカーになるか、管理者に確認してください。")
 
     try:
-        await member.edit(suppress=False)
-    except discord.HTTPException:
-        pass
-
-    try:
+        speaker_note = "スピーカー招待を送信しました。承認の案内が表示された場合は承認してください。\n" if invited else ""
         await stage_channel.send(
-            f"{member.mention} さん、一時ステージを作成しました！\n"
-            "設定の変更やステージの終了は 🎛️ ボタンから、絵文字リアクションは 🎉 ボタンからどうぞ。",
+            f"{member.mention} さん、一時ステージのチャンネルを作成しました！ {stage_channel.mention}\n"
+            + speaker_note
+            + "設定の変更やステージの終了は 🎛️ ボタンから、絵文字リアクションは 🎉 ボタンからどうぞ。"
+            + ("\n" + "\n".join(warnings) if warnings else ""),
             view=SummonAndReactionView()
         )
     except discord.HTTPException:
-        pass
+        log.exception("ステージ作成結果の案内に失敗しました: guild_id=%s channel_id=%s user_id=%s",
+                      guild.id, stage_channel.id, member.id)
 
     return stage_channel
 
