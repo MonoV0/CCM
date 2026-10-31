@@ -47,7 +47,13 @@ async def test_new_stage_grants_chat_and_hand_raise_without_management(modules, 
     creator = member(guild, 7)
     create = AsyncMock(return_value=channel)
     monkeypatch.setattr(discord.Guild, 'create_stage_channel', create)
-    monkeypatch.setattr(discord.Member, 'move_to', AsyncMock())
+    async def move_to(destination):
+        guild._add_channel(destination)
+        guild._update_voice_state({'user_id': str(creator.id), 'session_id': 'test', 'deaf': False,
+                                  'mute': False, 'self_deaf': False, 'self_mute': False,
+                                  'suppress': True}, destination.id)
+
+    monkeypatch.setattr(discord.Member, 'move_to', AsyncMock(side_effect=move_to))
     edit = AsyncMock()
     monkeypatch.setattr(discord.Member, 'edit', edit)
     monkeypatch.setattr(discord.StageChannel, 'create_instance', AsyncMock())
