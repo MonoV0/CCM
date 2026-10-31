@@ -19,13 +19,57 @@ from storage import (
     save_data,
     load_hidden_data,
     save_hidden_data,
+    INDEX_CHANNEL_NAME,
 )
-from utils import get_existing_channel, hide_channel_from_others, make_embed, make_privacy_embed
+from utils import get_existing_channel, hide_channel_from_others, make_embed, make_privacy_embed, refresh_existing_channel_indexes
 from views import RulesView, ChannelSettingsView, ApprovalView, register_onboarding_views
 from invitations import restore_approval_views
 
 _command_sync_task = None
 _commands_synced = False
+_index_refresh_task = None
+
+
+async def refresh_indexes_on_ready():
+    for guild in bot.guilds:
+        await refresh_existing_channel_indexes(guild)
+
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    if before.overwrites == after.overwrites and before.category_id == after.category_id:
+        return
+    categories = [after] if isinstance(after, discord.CategoryChannel) else [before.category, after.category]
+    await refresh_existing_channel_indexes(after.guild, categories)
+
+
+@bot.event
+async def on_guild_channel_create(channel):
+    if not isinstance(channel, discord.CategoryChannel) and channel.name != INDEX_CHANNEL_NAME:
+        await refresh_existing_channel_indexes(channel.guild, [channel.category])
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    if not isinstance(channel, discord.CategoryChannel) and channel.name != INDEX_CHANNEL_NAME:
+        await refresh_existing_channel_indexes(channel.guild, [channel.category])
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    if before.permissions != after.permissions:
+        await refresh_existing_channel_indexes(after.guild)
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    await refresh_existing_channel_indexes(role.guild)
+
+
+@bot.event
+async def on_member_update(before, after):
+    if before.roles != after.roles:
+        await refresh_existing_channel_indexes(after.guild)
 
 
 async def sync_commands_with_retry():
@@ -170,7 +214,7 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_ready():
-    global _command_sync_task
+    global _command_sync_task, _index_refresh_task
     try:
         restore_approval_views(ApprovalView)
     except Exception as error:
@@ -187,6 +231,8 @@ async def on_ready():
     # on_readyは再接続でも呼ばれる。実行中・成功済みの同期を重複させない。
     if not _commands_synced and (_command_sync_task is None or _command_sync_task.done()):
         _command_sync_task = asyncio.create_task(sync_commands_with_retry())
+    if bot.guilds and (_index_refresh_task is None or _index_refresh_task.done()):
+        _index_refresh_task = asyncio.create_task(refresh_indexes_on_ready())
 
     print(f"起動しました：{bot.user}")
 
